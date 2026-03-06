@@ -1,0 +1,381 @@
+---
+title: Infrastructure Overview
+description: Complete architecture of Suron Vault's distributed infrastructure
+---
+
+Suron Vault runs on infrastructure you own and deploy. The system is distributed across multiple platforms to ensure security through separation of concerns.
+
+## Components
+
+<CardGroup cols={2}>
+  <Card title="Cloudflare Worker" icon="cloud" href="/infrastructure/cloudflare-worker">
+    Central hub handling all API requests, routing, and Telegram webhook
+  </Card>
+  <Card title="Convex Database" icon="database" href="/infrastructure/convex-setup">
+    Stores app state, logs, and the Convex half of the split master key
+  </Card>
+  <Card title="Cloudflare KV" icon="key" href="/infrastructure/cloudflare-worker#kv-namespace">
+    Stores the Cloudflare key half, encrypted vault files, and permit tokens
+  </Card>
+  <Card title="Telegram Bot" icon="telegram" href="/infrastructure/telegram-bot">
+    Sends approval notifications and provides admin controls
+  </Card>
+</CardGroup>
+
+## Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│                      Your Node.js App                           │
+│                    (@suronai/sdk installed)                     │
+│                                                                 │
+│  vault.load() blocks → requests approval                        │
+│                                                                 │
+└────────────┬────────────────────────────────────────────────────┘
+             │
+             │ POST /request {appId, hostname}
+             ↓
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│                    Cloudflare Worker                            │
+│              (suronai-vault.workers.dev)                        │
+│                                                                 │
+│  • Routes SDK and CLI requests                                  │
+│  • Handles Telegram webhook                                     │
+│  • Manages authentication                                       │
+│                                                                 │
+├─────────────┬──────────────────────────────────┬────────────────┤
+│             │                                  │                │
+│    Cloudflare KV                         Convex Backend         │
+│                                                                 │
+│  • Cloudflare key half               • Convex key half          │
+│  • Encrypted vault files             • App state & status       │
+│  • Permit tokens (24h TTL)           • Activity logs            │
+│                                      • Permit expiry tracking   │
+│                                                                 │
+└─────────────┴──────────────────────────────────┴────────────────┘
+             │
+             │ Telegram notification with inline buttons
+             ↓
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│                      Telegram Bot                               │
+│                   (@YourBotName_bot)                            │
+│                                                                 │
+│  Admin receives notification → taps "✅ Approve"                │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+             │
+             │ Callback query via webhook
+             ↓
+        Worker processes approval
+             │
+             │ SDK polls /status → gets permitToken
+             │ Then calls /keys → receives both key halves
+             ↓
+   App decrypts secrets in RAM → runs normally
+```
+
+## Security Model
+
+### Split Master Key
+
+The master encryption key is **never stored whole**. It's split into two halves:
+
+```javascript
+masterKey = convexHalf + cfHalf
+```
+
+- **Convex half**: Stored in Convex database (`vault_apps.convexHalf`)
+- **Cloudflare half**: Stored in Cloudflare KV (`key:cf:{appId}`)
+
+Both halves are required to decrypt secrets. Even if one system is compromised, your secrets remain safe.
+
+### Token Separation
+
+Three different tokens protect different access levels:
+
+| Token | Used By | Can Access |
+|-------|---------|------------|
+| `VAULT_ACCESS_TOKEN` | SDK (server runtime) | SDK routes: `/fetch-vault`, `/request`, `/resume`, `/status`, `/keys`, `/loaded`, `/heartbeat` |
+| `VAULT_CLI_TOKEN` | CLI (dev machine) | Admin routes: `/admin/init`, `/admin/keys`, `/admin/rotate`, `/admin/upload` |
+| `BOT_TOKEN` | Telegram | Webhook endpoint `/webhook` only |
+
+SDK tokens cannot reach admin routes. CLI tokens never live on production servers.
+
+### Permit Tokens
+
+When you approve an app access request, the Worker generates a 24-hour **permit token**:
+
+- Stored in Convex with expiry timestamp
+- Cached in KV for fast polling retrieval
+- SDK keeps it in RAM only (never on disk by default)
+- Allows trusted restarts without re-approval
+- Automatically revoked on key rotation or manual stop
+
+## Data Flow
+
+### Initial Setup (CLI)
+
+<Steps>
+  <Step title="Admin runs suron init">
+    CLI generates two random key halves and registers the app
+    
+    ```bash
+    POST /admin/init
+    {
+      "appId": "my-app",
+      "convexHalf": "abc123...",
+      "cfHalf": "def456..."
+    }
+    ```
+  </Step>
+  
+  <Step title="Worker stores key halves">
+    - Convex half → Convex DB via `vault:storeConvexHalf`
+    - Cloudflare half → KV at `key:cf:my-app`
+    - App record created in `vault_apps` table
+  </Step>
+  
+  <Step title="Admin encrypts secrets">
+    CLI reconstructs the master key, encrypts `.env` → `.env.suron`
+    
+    ```bash
+    suron encrypt
+    ```
+    
+    Automatically uploads encrypted vault:
+    
+    ```bash
+    POST /admin/upload
+    {
+      "appId": "my-app",
+      "vaultData": "VAULT_APP=my-app\nDATABASE_URL=enc:sv1:..."
+    }
+    ```
+  </Step>
+</Steps>
+
+### Runtime Approval Flow
+
+<Steps>
+  <Step title="App calls vault.load()">
+    SDK sends request with server hostname:
+    
+    ```javascript
+    POST /request
+    {
+      "appId": "my-app",
+      "hostname": "prod-server-01"
+    }
+    ```
+  </Step>
+  
+  <Step title="Worker sends Telegram notification">
+    Admin receives message with app details and inline buttons:
+    
+    - ✅ Approve
+    - ❌ Deny
+  </Step>
+  
+  <Step title="Admin taps Approve">
+    Worker generates permit token and updates status:
+    
+    ```javascript
+    // Convex mutation
+    vault:setStatus({appId: "my-app", status: "approved"})
+    vault:issuePermit({appId: "my-app", permitToken: "..."}) // 24h expiry
+    
+    // KV cache for fast polling
+    KV.put("permit:my-app", permitToken, {expirationTtl: 86400})
+    ```
+  </Step>
+  
+  <Step title="SDK polls and fetches keys">
+    ```javascript
+    // Poll until approved
+    GET /status → {status: "approved", permitToken: "..."}
+    
+    // Fetch encrypted vault
+    POST /fetch-vault → {vaultData: "..."}
+    
+    // Get key halves
+    POST /keys → {convexHalf: "...", cfHalf: "..."}
+    ```
+  </Step>
+  
+  <Step title="SDK decrypts in RAM">
+    - Joins key halves into master key
+    - Decrypts each `enc:sv1:...` value
+    - Loads into `process.env`
+    - Master key is discarded (garbage collected)
+    - Only permit token remains in RAM for future restarts
+  </Step>
+  
+  <Step title="Heartbeat starts">
+    SDK sends heartbeat every 30 seconds:
+    
+    ```javascript
+    POST /heartbeat
+    {
+      "appId": "my-app",
+      "knownVaultVersion": 0
+    }
+    
+    // Response
+    {
+      "ok": true,
+      "status": "active",
+      "vaultVersion": 5,
+      "shouldReload": true  // if vaultVersion > knownVaultVersion
+    }
+    ```
+  </Step>
+</Steps>
+
+### Trusted Restart Flow
+
+If the app restarts and has a valid permit token in RAM:
+
+<Steps>
+  <Step title="SDK tries /resume first">
+    ```javascript
+    POST /resume
+    {
+      "appId": "my-app",
+      "permitToken": "...",
+      "hostname": "prod-server-01",
+      "knownVaultVersion": 3
+    }
+    ```
+  </Step>
+  
+  <Step title="Worker validates permit">
+    Convex query checks:
+    - Permit token matches stored value
+    - `permitExpiry` > current time
+    - Returns `{valid: true, vaultVersion: 5}`
+  </Step>
+  
+  <Step title="Auto-approved if valid">
+    - Status set to `approved` immediately
+    - No Telegram notification needed
+    - SDK proceeds to fetch vault and keys
+    - Silent notification sent: "Auto-resumed" (optional stop button)
+  </Step>
+  
+  <Step title="Falls back if invalid">
+    If permit expired or revoked:
+    ```json
+    {
+      "ok": false,
+      "reason": "expired",
+      "fallback": "full_approval"
+    }
+    ```
+    SDK falls back to normal `/request` flow
+  </Step>
+</Steps>
+
+### Hot Reload Flow
+
+When admin updates secrets:
+
+<Steps>
+  <Step title="Admin uploads new vault">
+    ```bash
+    suron encrypt  # auto-uploads
+    ```
+    
+    Worker increments `vaultVersion` in Convex
+  </Step>
+  
+  <Step title="Heartbeat detects change">
+    SDK's next heartbeat:
+    ```json
+    POST /heartbeat {"knownVaultVersion": 3}
+    
+    Response: {"vaultVersion": 4, "shouldReload": true}
+    ```
+  </Step>
+  
+  <Step title="SDK hot-reloads secrets">
+    - Fetches new vault data
+    - Retrieves key halves again
+    - Decrypts in-place
+    - Updates `process.env`
+    - Updates `knownVaultVersion` to 4
+    - Emits `vault:reload` event
+  </Step>
+</Steps>
+
+## Deployment Overview
+
+To deploy your own Suron Vault infrastructure:
+
+<Steps>
+  <Step title="Deploy Convex backend">
+    See [Convex Setup](/infrastructure/convex-setup)
+  </Step>
+  
+  <Step title="Create Telegram bot">
+    See [Telegram Bot Setup](/infrastructure/telegram-bot)
+  </Step>
+  
+  <Step title="Deploy Cloudflare Worker">
+    See [Cloudflare Worker Deployment](/infrastructure/cloudflare-worker)
+  </Step>
+  
+  <Step title="Configure environment variables">
+    See [Environment Variables Reference](/infrastructure/environment-variables)
+  </Step>
+</Steps>
+
+## Monitoring
+
+### Activity Logs
+
+All actions are logged to Convex `vault_logs` table:
+
+- `initialized` - App registered via `suron init`
+- `access_requested` - SDK called `/request`
+- `approved` - Admin tapped Approve
+- `denied` - Admin tapped Deny or `/stop` command
+- `stopped` - Admin tapped Stop button
+- `resumed_with_permit` - Trusted restart succeeded
+- `secrets_loaded` - SDK called `/loaded`
+- `key_rotated` - Admin ran `suron rotate`
+- `vault_uploaded` - Admin ran `suron encrypt`
+
+View logs:
+```
+/logs my-app
+```
+
+### App Status States
+
+| Status | Meaning |
+|--------|----------|
+| `idle` | Registered but never requested access |
+| `pending` | Waiting for admin approval |
+| `approved` | Admin approved, SDK may proceed |
+| `active` | Secrets loaded, heartbeat running |
+| `denied` | Access denied by admin |
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Deploy Worker" icon="rocket" href="/infrastructure/cloudflare-worker">
+    Deploy the Cloudflare Worker and configure secrets
+  </Card>
+  <Card title="Setup Convex" icon="database" href="/infrastructure/convex-setup">
+    Initialize the Convex backend database
+  </Card>
+  <Card title="Configure Bot" icon="telegram" href="/infrastructure/telegram-bot">
+    Create and configure your Telegram bot
+  </Card>
+  <Card title="Environment Vars" icon="code" href="/infrastructure/environment-variables">
+    Complete reference of all configuration options
+  </Card>
+</CardGroup>

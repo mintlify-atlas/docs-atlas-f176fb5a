@@ -1,0 +1,300 @@
+---
+title: Vault SDK
+description: Core vault operations for loading and managing secrets
+---
+
+The Vault SDK provides methods to load, reload, and manage encrypted secrets in your Node.js application.
+
+## Installation
+
+```bash
+npm install @suronai/sdk
+```
+
+## Import
+
+```javascript
+import { vault } from '@suronai/sdk'
+```
+
+## Methods
+
+### vault.load()
+
+Fetches and decrypts secrets into `process.env`. This is the primary method called on application startup.
+
+<ParamField path="none" type="void">
+  No parameters required. Configuration is read from environment variables.
+</ParamField>
+
+<ResponseField name="void" type="Promise<void>">
+  Returns a promise that resolves when secrets are successfully loaded.
+</ResponseField>
+
+#### Required Environment Variables
+
+<ParamField path="VAULT_WORKER_URL" type="string" required>
+  The URL of your deployed Suron Worker (e.g., `https://vault.example.workers.dev`)
+</ParamField>
+
+<ParamField path="VAULT_ACCESS_TOKEN" type="string" required>
+  Server access token for authenticating with the Worker. Never commit this to version control.
+</ParamField>
+
+<ParamField path="VAULT_APP_ID" type="string" required>
+  Unique identifier for your application (e.g., `my-api-production`)
+</ParamField>
+
+#### Behavior
+
+1. **Trusted Restart Flow**: If a permit token exists in memory (from a previous load), attempts to resume without Telegram approval
+2. **Full Approval Flow**: If no permit exists or permit is invalid/expired:
+   - Fetches vault data from Worker
+   - Sends access request (triggers Telegram notification to admin)
+   - Polls for admin approval (5 minute timeout)
+   - On approval, receives permit token and stores it in memory
+   - Reconstructs master key from split halves (Convex + Cloudflare)
+   - Decrypts secrets and loads them into `process.env`
+3. **Heartbeat**: Starts automatic heartbeat to Worker after successful load
+
+#### Example
+
+```javascript
+import { vault } from '@suronai/sdk'
+
+// Load secrets on startup
+try {
+  await vault.load()
+  console.log('Secrets loaded successfully')
+  // process.env now contains decrypted secrets
+} catch (error) {
+  console.error('Failed to load secrets:', error.message)
+  process.exit(1)
+}
+```
+
+#### Source Reference
+
+See SDK/src/vault.js:48
+
+---
+
+### vault.hotReload()
+
+Manually triggers a hot-reload of secrets without restarting the application. This is typically called automatically by the heartbeat system when vault updates are detected.
+
+<ParamField path="workerUrl" type="string" required>
+  The URL of your Suron Worker
+</ParamField>
+
+<ParamField path="appId" type="string" required>
+  Your application ID
+</ParamField>
+
+<ParamField path="token" type="string" required>
+  VAULT_ACCESS_TOKEN for authentication
+</ParamField>
+
+<ParamField path="newVaultVersion" type="number" required>
+  The new vault version number being loaded
+</ParamField>
+
+<ResponseField name="void" type="Promise<void>">
+  Returns a promise that resolves when secrets are reloaded
+</ResponseField>
+
+#### Behavior
+
+1. Fetches latest vault data from Worker
+2. Reconstructs master key from split halves
+3. Decrypts secrets and updates `process.env` in-place
+4. Updates known vault version
+5. Notifies Worker that secrets are loaded
+
+**Note**: This is typically called automatically by the heartbeat system. Manual calls are rarely needed.
+
+#### Example
+
+```javascript
+import { vault } from '@suronai/sdk'
+
+const workerUrl = process.env.VAULT_WORKER_URL
+const token = process.env.VAULT_ACCESS_TOKEN
+const appId = process.env.VAULT_APP_ID
+
+// Manual hot-reload (usually not needed)
+await vault.hotReload(workerUrl, appId, token, 2)
+```
+
+#### Source Reference
+
+See SDK/src/vault.js:118
+
+---
+
+### vault.getPermitToken()
+
+Returns the current in-memory permit token. This token enables trusted restarts without requiring Telegram approval.
+
+<ParamField path="none" type="void">
+  No parameters required
+</ParamField>
+
+<ResponseField name="permitToken" type="string | null">
+  The current permit token, or `null` if none exists
+</ResponseField>
+
+#### Behavior
+
+- Returns the permit token stored in memory after a successful approval
+- Returns `null` if no approval has occurred yet or if permit was revoked
+- Can be seeded from `VAULT_PERMIT` environment variable for trusted restarts across process exits
+
+#### Example
+
+```javascript
+import { vault } from '@suronai/sdk'
+
+await vault.load()
+
+const permit = vault.getPermitToken()
+if (permit) {
+  console.log('Permit token available for trusted restarts')
+  // You can persist this for process restarts
+  // See example 06-trusted-restart
+} else {
+  console.log('No permit token available')
+}
+```
+
+#### Source Reference
+
+See SDK/src/vault.js:130
+
+---
+
+## Internal Helpers
+
+The following functions are used internally by the vault module:
+
+### fetchAndDecrypt()
+
+<Info>
+Internal function - not exported. Used by `load()` and `hotReload()` to fetch vault data and decrypt secrets.
+</Info>
+
+```javascript
+async function fetchAndDecrypt(workerUrl, appId, token)
+```
+
+**Process**:
+1. Fetches vault data via `/fetch-vault` endpoint
+2. Fetches key halves via `/keys` endpoint  
+3. Joins key halves to reconstruct master key
+4. Parses vault file format
+5. Decrypts each secret using AES-256-GCM
+6. Loads decrypted values into `process.env`
+7. Returns count of loaded secrets
+
+#### Source Reference
+
+See SDK/src/vault.js:28
+
+---
+
+## Configuration
+
+### Environment Variables
+
+All configuration is provided via environment variables:
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `VAULT_WORKER_URL` | Yes | URL of deployed Suron Worker |
+| `VAULT_ACCESS_TOKEN` | Yes | Server access token (keep secret) |
+| `VAULT_APP_ID` | Yes | Unique application identifier |
+| `VAULT_PERMIT` | No | Pre-seeded permit token for trusted restarts |
+
+### Example .env File
+
+```bash
+VAULT_WORKER_URL=https://vault.example.workers.dev
+VAULT_ACCESS_TOKEN=your-secret-access-token-here
+VAULT_APP_ID=my-api-production
+```
+
+<Warning>
+Never commit `VAULT_ACCESS_TOKEN` to version control. This token grants access to decrypt your secrets.
+</Warning>
+
+---
+
+## Error Handling
+
+### Common Errors
+
+**Missing Environment Variable**
+```javascript
+Error: Missing required env var: VAULT_WORKER_URL
+```
+Solution: Ensure all required environment variables are set.
+
+**No Vault Found**
+```javascript
+Error: No vault found for "my-app" — run: suron encrypt
+```
+Solution: Upload your encrypted vault using `suron encrypt` or `suron upload`.
+
+**Approval Timeout**
+```javascript
+Error: No response after 5 minutes — access denied by timeout
+```
+Solution: Admin must approve the access request in Telegram within 5 minutes.
+
+**Access Denied**
+```javascript
+Error: Access denied by admin
+```
+Solution: Admin denied the access request. Check with your administrator.
+
+**Decryption Failed**
+```javascript
+Failed to decrypt: DATABASE_URL
+```
+Solution: The secret may have been encrypted with a different master key. Check if keys were rotated.
+
+---
+
+## Complete Example
+
+```javascript
+import express from 'express'
+import { vault } from '@suronai/sdk'
+
+const app = express()
+
+// Load secrets before starting server
+async function main() {
+  try {
+    await vault.load()
+    console.log('✓ Secrets loaded')
+    
+    // Now process.env contains your decrypted secrets
+    const port = process.env.PORT || 3000
+    const dbUrl = process.env.DATABASE_URL
+    
+    app.get('/', (req, res) => {
+      res.json({ status: 'ok' })
+    })
+    
+    app.listen(port, () => {
+      console.log(`Server running on port ${port}`)
+    })
+  } catch (error) {
+    console.error('Failed to start:', error.message)
+    process.exit(1)
+  }
+}
+
+main()
+```

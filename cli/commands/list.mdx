@@ -1,0 +1,247 @@
+---
+title: suron list
+description: List all secret keys in your Suron Vault
+---
+
+The `list` command displays all secret key names in your vault along with their encryption status. It does not show decrypted values.
+
+## Usage
+
+```bash
+suron list
+```
+
+## Parameters
+
+This command takes no parameters. App name is automatically detected from `.env.suron`.
+
+## Examples
+
+### List Secrets
+
+```bash
+suron list
+```
+
+Output:
+
+```bash
+  app  myapp
+
+  DATABASE_URL enc:sv1
+  API_KEY enc:sv1
+  SESSION_SECRET enc:sv1
+  STRIPE_KEY enc:sv1
+
+  4 secrets
+```
+
+### Empty Vault
+
+If no secrets exist:
+
+```bash
+suron list
+```
+
+Output:
+
+```bash
+⚠ No secrets in .env.suron — run: suron encrypt
+```
+
+## Output Format
+
+### With Encrypted Secrets
+
+Each secret is displayed with its encryption status:
+
+```bash
+  app  myapp
+
+  DATABASE_URL enc:sv1
+  API_KEY enc:sv1
+  SESSION_SECRET enc:sv1
+
+  3 secrets
+```
+
+- **Gray "app" label** - Shows the application name
+- **White key names** - The secret keys
+- **Gray "enc:sv1" tag** - Indicates encrypted with Suron v1
+- **Gray summary** - Total count at the bottom
+
+### With Plaintext Secrets
+
+If a secret is not encrypted (unusual):
+
+```bash
+  app  myapp
+
+  DATABASE_URL enc:sv1
+  DEBUG plaintext
+
+  2 secrets
+```
+
+Plaintext secrets show a yellow warning tag.
+
+### Without App Name
+
+If `.env.suron` doesn't contain an app identifier:
+
+```bash
+  DATABASE_URL enc:sv1
+  API_KEY enc:sv1
+
+  2 secrets
+```
+
+The app name line is omitted.
+
+## How It Works
+
+1. **Reads `.env.suron`** from current directory
+2. **Parses lines** to extract key-value pairs
+3. **Filters secrets** (excludes metadata like `VAULT_APP=`)
+4. **Checks encryption status** for each value
+5. **Displays key names** with encryption indicators
+
+## What It Shows
+
+The command displays:
+
+- Secret key names (e.g., `DATABASE_URL`)
+- Encryption status (`enc:sv1` or `plaintext`)
+- Total secret count
+
+**It does NOT show:**
+
+- Decrypted values (use `suron decrypt KEY` for that)
+- Encrypted ciphertext
+- Comments from the vault file
+
+## Encryption Indicators
+
+### `enc:sv1`
+
+The secret is encrypted using Suron v1 encryption:
+
+```bash
+  API_KEY enc:sv1
+```
+
+This is the expected state for all secrets.
+
+### `plaintext`
+
+The secret value is stored in plaintext:
+
+```bash
+  DEBUG plaintext
+```
+
+This typically happens if:
+- The value was manually edited in `.env.suron`
+- The secret was added before encryption was set up
+- The value doesn't start with `enc:sv1:`
+
+<Warning>
+  Plaintext secrets in `.env.suron` defeat the purpose of encryption. Re-encrypt them with `suron encrypt` or remove and re-add them.
+</Warning>
+
+## Use Cases
+
+### Verify Secrets Exist
+
+```bash
+suron list
+```
+
+Check that expected secrets are present before deployment.
+
+### Audit Secret Inventory
+
+```bash
+suron list > secrets-inventory.txt
+```
+
+Document what secrets exist (without exposing values).
+
+### Check Encryption Status
+
+```bash
+suron list
+```
+
+Verify all secrets show `enc:sv1` tag.
+
+### Before Adding a Secret
+
+```bash
+suron list | grep -i database
+```
+
+Check if a similar key already exists before adding.
+
+## Error Cases
+
+### No Vault File
+
+If `.env.suron` doesn't exist:
+
+```bash
+⚠ No secrets in .env.suron — run: suron encrypt
+```
+
+Solution: [Initialize](/cli/commands/init) and [encrypt](/cli/commands/encrypt) first.
+
+### Not Logged In
+
+```bash
+✗ Not logged in — run: suron login
+```
+
+Solution: [Authenticate first](/cli/authentication#login)
+
+## Output Details
+
+### Secret Counting
+
+Only actual secrets are counted. Excluded from count:
+
+- Comments (`# This is a comment`)
+- Blank lines
+- Metadata (`VAULT_APP=myapp`)
+- Header (`# Encrypted with @suronai/cli`)
+
+Example vault file:
+
+```bash
+# Encrypted with @suronai/cli
+VAULT_APP=myapp
+
+# Database secrets
+DATABASE_URL=enc:sv1:...
+
+# API keys
+API_KEY=enc:sv1:...
+```
+
+Output:
+
+```bash
+  app  myapp
+
+  DATABASE_URL enc:sv1
+  API_KEY enc:sv1
+
+  2 secrets  # Only actual secrets counted
+```
+
+## Related Commands
+
+- [suron decrypt](/cli/commands/decrypt) - View a specific secret's value
+- [suron add](/cli/commands/add) - Add a new secret
+- [suron remove](/cli/commands/remove) - Remove a secret
+- [suron encrypt](/cli/commands/encrypt) - Bulk encrypt secrets

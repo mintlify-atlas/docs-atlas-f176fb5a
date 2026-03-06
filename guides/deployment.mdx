@@ -1,0 +1,263 @@
+---
+title: Deployment Guide
+description: Step-by-step guide for deploying applications with Suron Vault
+---
+
+Deploy your application with Suron Vault following these steps. This guide covers infrastructure setup, environment configuration, and first-time approval.
+
+## Prerequisites
+
+Before deploying, ensure you have:
+
+- Suron CLI installed (`npm install -g @suronai/cli`)
+- A Cloudflare Workers account
+- Telegram bot configured
+- Your application code ready
+
+## Deployment Workflow
+
+<Steps>
+  <Step title="Install and Login">
+    Install the CLI globally and authenticate:
+
+    ```bash
+    npm install -g @suronai/cli
+    suron login
+    ```
+
+    You'll be prompted for:
+    - **Suron Worker URL**: Your Cloudflare Worker endpoint (e.g., `https://suronai-vault.your-account.workers.dev`)
+    - **Username**: Your admin username
+    - **Password**: Your admin password
+
+    <Tip>
+      Your credentials are stored securely in `~/.suron/auth.json`
+    </Tip>
+  </Step>
+
+  <Step title="Initialize Your Application">
+    Create the vault infrastructure for your app:
+
+    ```bash
+    suron init --app my-app
+    ```
+
+    This command:
+    - Generates a master encryption key
+    - Splits the key between Convex (database) and Cloudflare (worker)
+    - Creates a stub `.env.suron` file
+    - Updates `.gitignore` to exclude sensitive files
+
+    <Warning>
+      The master key is stored remotely only - no local key files are created. This means you cannot decrypt secrets without server access.
+    </Warning>
+  </Step>
+
+  <Step title="Encrypt Your Secrets">
+    Convert your `.env` file to encrypted `.env.suron`:
+
+    ```bash
+    # From existing .env file
+    suron encrypt
+
+    # Or specify a custom file
+    suron encrypt --file .env.production
+    ```
+
+    The encrypted vault is automatically pushed to the server. Your `.env.suron` will look like:
+
+    ```env
+    # Encrypted with Suron
+    # App: my-app
+    VAULT_APP=my-app
+    DATABASE_URL=suron:v1:AbCdEf123456...
+    API_KEY=suron:v1:XyZ789...
+    STRIPE_SECRET=suron:v1:QuX456...
+    ```
+
+    <Tip>
+      Commit `.env.suron` to git - it's encrypted and safe to version control. Never commit `.env`.
+    </Tip>
+  </Step>
+
+  <Step title="Configure Server Environment">
+    Set these environment variables on your deployment platform:
+
+    ```env
+    VAULT_WORKER_URL=https://suronai-vault.your-account.workers.dev
+    VAULT_ACCESS_TOKEN=your_server_access_token
+    VAULT_APP_ID=my-app
+    ```
+
+    <Accordion title="Platform-specific configuration">
+      **Vercel**
+      ```bash
+      vercel env add VAULT_WORKER_URL
+      vercel env add VAULT_ACCESS_TOKEN
+      vercel env add VAULT_APP_ID
+      ```
+
+      **Railway**
+      ```bash
+      railway variables set VAULT_WORKER_URL=https://...
+      railway variables set VAULT_ACCESS_TOKEN=token
+      railway variables set VAULT_APP_ID=my-app
+      ```
+
+      **Render**
+      Add variables in the dashboard under "Environment"
+
+      **Docker**
+      ```dockerfile
+      ENV VAULT_WORKER_URL=https://suronai-vault.your-account.workers.dev
+      ENV VAULT_ACCESS_TOKEN=your_token
+      ENV VAULT_APP_ID=my-app
+      ```
+    </Accordion>
+
+    <Warning>
+      Never commit `VAULT_ACCESS_TOKEN` to git. Add it only to your deployment platform's environment.
+    </Warning>
+  </Step>
+
+  <Step title="Integrate SDK in Your Application">
+    Install the SDK and add vault loading as the first line:
+
+    ```bash
+    npm install @suronai/sdk
+    ```
+
+    ```javascript
+    import { vault } from '@suronai/sdk'
+    import express from 'express'
+
+    // MUST be the very first line - blocks until secrets are loaded
+    await vault.load()
+
+    // Secrets are now in process.env
+    const app = express()
+    const port = process.env.PORT || 3000
+
+    app.get('/health', (req, res) => {
+      res.json({ 
+        status: 'ok',
+        app: process.env.VAULT_APP_ID,
+        secrets: 'loaded'
+      })
+    })
+
+    app.listen(port, () => {
+      console.log(`Server running on port ${port}`)
+    })
+    ```
+
+    <Tip>
+      Call `vault.load()` before any code that uses environment variables. It blocks execution until secrets are decrypted.
+    </Tip>
+  </Step>
+
+  <Step title="Deploy and Approve">
+    Deploy your application to your hosting platform:
+
+    ```bash
+    # Example: Railway
+    railway up
+
+    # Example: Vercel
+    vercel --prod
+
+    # Example: Docker
+    docker build -t my-app .
+    docker run my-app
+    ```
+
+    **First-time approval flow:**
+
+    1. Your app starts and calls `vault.load()`
+    2. You receive a Telegram message:
+       ```
+       Suron — Vault Access Request
+
+       App:          my-app
+       Host:         your-server-hostname
+       Last active:  never
+
+       [ ✅ Approve ]  [ ❌ Deny ]
+       ```
+    3. Tap **Approve** in Telegram
+    4. Your app decrypts secrets and continues startup
+    5. A 24-hour permit token is issued for trusted restarts
+
+    <Warning>
+      The approval request times out after 5 minutes. If you miss it, the app will fail to start and you'll need to redeploy.
+    </Warning>
+  </Step>
+</Steps>
+
+## Database Configuration
+
+For applications using databases, ensure secrets are loaded before creating connections:
+
+```javascript
+import { vault } from '@suronai/sdk'
+import pg from 'pg'
+
+// Load secrets first
+await vault.load()
+
+// DATABASE_URL is now available in process.env
+const pool = new pg.Pool({ 
+  connectionString: process.env.DATABASE_URL 
+})
+
+// Verify connection
+try {
+  await pool.query('SELECT 1')
+  console.log('Database connected')
+} catch (err) {
+  console.error('Database connection failed:', err.message)
+  process.exit(1)
+}
+```
+
+## Environment Variables Reference
+
+| Variable | Required | Description | Example |
+|----------|----------|-------------|----------|
+| `VAULT_WORKER_URL` | Yes | Your Cloudflare Worker endpoint | `https://suronai-vault.account.workers.dev` |
+| `VAULT_ACCESS_TOKEN` | Yes | Server authentication token | `srv_abc123xyz...` |
+| `VAULT_APP_ID` | Yes | Application identifier | `my-app` |
+| `VAULT_PERMIT` | No | Permit token for trusted restarts | Auto-managed by SDK |
+
+## Deployment Checklist
+
+<Steps>
+  <Step title="Pre-deployment">
+    - [ ] Run `suron init --app my-app`
+    - [ ] Encrypt secrets with `suron encrypt`
+    - [ ] Commit `.env.suron` to git
+    - [ ] Verify `.env` is in `.gitignore`
+    - [ ] Set server environment variables
+  </Step>
+
+  <Step title="Code integration">
+    - [ ] Install `@suronai/sdk`
+    - [ ] Add `await vault.load()` as first line
+    - [ ] Remove any dotenv calls
+    - [ ] Test locally with `suron run index.js`
+  </Step>
+
+  <Step title="Deployment">
+    - [ ] Deploy to platform
+    - [ ] Monitor logs for vault connection
+    - [ ] Approve via Telegram within 5 minutes
+    - [ ] Verify app starts successfully
+    - [ ] Test health endpoint
+  </Step>
+</Steps>
+
+## Next Steps
+
+- Set up [CI/CD integration](/guides/ci-cd-integration) for automated deployments
+- Enable [trusted restarts](/guides/migration#permit-persistence) to skip Telegram approval
+- Configure [hot-reload](/sdk/hot-reload) for zero-downtime secret updates

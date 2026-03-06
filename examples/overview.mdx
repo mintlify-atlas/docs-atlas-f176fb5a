@@ -1,0 +1,89 @@
+---
+title: Examples Overview
+description: Real-world integration examples for Suron Vault
+---
+
+Real integration examples for `@suronai/sdk`. Each example is a standalone Node.js project showing how to integrate Suron Vault into different types of applications.
+
+## Available Examples
+
+<CardGroup cols={2}>
+  <Card title="Basic Integration" icon="code" href="/examples/basic">
+    Minimal integration showing the simplest possible usage with plain Node.js
+  </Card>
+  
+  <Card title="Express API" icon="server" href="/examples/express-api">
+    REST API server with secrets loaded before the server starts listening
+  </Card>
+  
+  <Card title="Fastify API" icon="bolt" href="/examples/fastify-api">
+    Fastify server with vault integration and webhook security
+  </Card>
+  
+  <Card title="Database Connection" icon="database" href="/examples/database">
+    PostgreSQL connection using DATABASE_URL from vault
+  </Card>
+  
+  <Card title="Cron Job" icon="clock" href="/examples/cron-job">
+    Background worker with scheduled jobs using vault secrets
+  </Card>
+  
+  <Card title="Trusted Restart" icon="rotate" href="/examples/trusted-restart">
+    Persist permit token to skip Telegram approval on restarts
+  </Card>
+  
+  <Card title="Hot Reload" icon="fire" href="/examples/hot-reload">
+    Live secret updates without restarting your application
+  </Card>
+</CardGroup>
+
+## Prerequisites
+
+All examples require these 3 environment variables on the server:
+
+```env
+VAULT_WORKER_URL=https://suronai-vault.your-account.workers.dev
+VAULT_ACCESS_TOKEN=your_server_access_token
+VAULT_APP_ID=my-app
+```
+
+Set them in `.env` locally, or as environment variables on your server/platform.
+
+## Quick Start
+
+```bash
+# 1. Set up infrastructure (once)
+suron login
+suron init --app my-app
+suron encrypt          # encrypts your .env → .env.suron and pushes
+
+# 2. Install SDK in your project
+npm install @suronai/sdk
+
+# 3. Add vault.load() as the very first line in your app
+# See any example below
+```
+
+## How Approval Works
+
+When your app starts, you'll receive a Telegram message:
+
+```
+Suron — Vault Access Request
+
+App:          my-app
+Host:         your-server-hostname
+Last active:  2h ago
+
+[ ✅ Approve ]  [ ❌ Deny ]
+```
+
+Tap **Approve** and your app decrypts its secrets and continues starting up.
+
+After the first approval, a **permit token** is issued. If you persist it, restarts skip Telegram automatically for 24 hours. See [Trusted Restart](/examples/trusted-restart).
+
+## Browse on GitHub
+
+View all examples with complete source code:
+
+[github.com/Cryptoistaken/Suron/tree/main/examples](https://github.com/Cryptoistaken/Suron/tree/main/examples)

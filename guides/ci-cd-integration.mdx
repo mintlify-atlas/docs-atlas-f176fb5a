@@ -1,0 +1,401 @@
+---
+title: CI/CD Integration
+description: Integrate Suron Vault with GitHub Actions, GitLab CI, and other automation workflows
+---
+
+Run Suron Vault commands in CI/CD pipelines without interactive prompts using the `--yes` flag and secure token management.
+
+## Non-Interactive Mode
+
+All Suron commands support `--yes` (or `-y`) for automation:
+
+```bash
+suron init --app my-app --yes
+suron encrypt --yes
+suron rotate --yes
+```
+
+<Warning>
+  Commands will fail if required parameters are missing in non-interactive mode. Always provide `--app` explicitly.
+</Warning>
+
+## Token Management
+
+CI/CD pipelines need authentication without interactive login. Store your CLI token as a secret:
+
+<Steps>
+  <Step title="Extract Your CLI Token">
+    After running `suron login` locally:
+
+    ```bash
+    # View your stored token
+    cat ~/.suron/auth.json
+    ```
+
+    Output:
+    ```json
+    {
+      "workerUrl": "https://suronai-vault.account.workers.dev",
+      "token": "cli_abc123xyz..."
+    }
+    ```
+
+    Copy the `token` value.
+  </Step>
+
+  <Step title="Store as CI/CD Secret">
+    Add these secrets to your CI/CD platform:
+
+    - `VAULT_CLI_TOKEN`: Your CLI authentication token
+    - `VAULT_WORKER_URL`: Your Cloudflare Worker URL
+
+    <Accordion title="Platform-specific setup">
+      **GitHub Actions**
+      
+      Go to repository Settings → Secrets and variables → Actions → New repository secret
+
+      **GitLab CI**
+      
+      Go to Settings → CI/CD → Variables → Add variable (mark as Protected and Masked)
+
+      **CircleCI**
+      
+      Go to Project Settings → Environment Variables → Add Environment Variable
+
+      **Jenkins**
+      
+      Use Credentials plugin to store as Secret Text
+    </Accordion>
+  </Step>
+
+  <Step title="Create Auth Config in Pipeline">
+    Before running Suron commands, create the auth file:
+
+    ```bash
+    mkdir -p ~/.suron
+    echo '{"workerUrl":"'"$VAULT_WORKER_URL"'","token":"'"$VAULT_CLI_TOKEN"'"}' > ~/.suron/auth.json
+    ```
+
+    Now all `suron` commands will authenticate automatically.
+  </Step>
+</Steps>
+
+## GitHub Actions Integration
+
+### Encrypt and Deploy on Push
+
+```yaml
+name: Deploy with Suron
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Suron CLI
+        run: npm install -g @suronai/cli
+
+      - name: Configure Suron auth
+        env:
+          VAULT_WORKER_URL: ${{ secrets.VAULT_WORKER_URL }}
+          VAULT_CLI_TOKEN: ${{ secrets.VAULT_CLI_TOKEN }}
+        run: |
+          mkdir -p ~/.suron
+          echo '{"workerUrl":"'"$VAULT_WORKER_URL"'","token":"'"$VAULT_CLI_TOKEN"'"}' > ~/.suron/auth.json
+
+      - name: Encrypt secrets
+        run: suron encrypt --app my-app --yes
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Deploy to production
+        env:
+          VAULT_WORKER_URL: ${{ secrets.VAULT_WORKER_URL }}
+          VAULT_ACCESS_TOKEN: ${{ secrets.VAULT_ACCESS_TOKEN }}
+          VAULT_APP_ID: my-app
+        run: |
+          npm run build
+          npm run deploy
+```
+
+### Rotate Keys on Schedule
+
+```yaml
+name: Rotate Vault Keys
+
+on:
+  schedule:
+    # Run monthly on the 1st at 2am UTC
+    - cron: '0 2 1 * *'
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  rotate:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Suron CLI
+        run: npm install -g @suronai/cli
+
+      - name: Configure Suron auth
+        env:
+          VAULT_WORKER_URL: ${{ secrets.VAULT_WORKER_URL }}
+          VAULT_CLI_TOKEN: ${{ secrets.VAULT_CLI_TOKEN }}
+        run: |
+          mkdir -p ~/.suron
+          echo '{"workerUrl":"'"$VAULT_WORKER_URL"'","token":"'"$VAULT_CLI_TOKEN"'"}' > ~/.suron/auth.json
+
+      - name: Rotate master key
+        run: suron rotate --app my-app --yes
+
+      - name: Commit updated vault
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add .env.suron
+          git commit -m "chore: rotate vault keys [skip ci]"
+          git push
+
+      - name: Trigger redeployment
+        env:
+          DEPLOY_WEBHOOK: ${{ secrets.DEPLOY_WEBHOOK }}
+        run: curl -X POST $DEPLOY_WEBHOOK
+```
+
+<Warning>
+  After key rotation, redeploy your application immediately. The old key is invalidated and running apps will fail.
+</Warning>
+
+## GitLab CI Integration
+
+```yaml
+stages:
+  - build
+  - deploy
+
+variables:
+  VAULT_APP_ID: my-app
+
+build:
+  stage: build
+  image: node:20
+  before_script:
+    - npm install -g @suronai/cli
+    - mkdir -p ~/.suron
+    - echo '{"workerUrl":"'"$VAULT_WORKER_URL"'","token":"'"$VAULT_CLI_TOKEN"'"}' > ~/.suron/auth.json
+  script:
+    - suron encrypt --app $VAULT_APP_ID --yes
+    - npm ci
+    - npm run build
+  artifacts:
+    paths:
+      - dist/
+      - .env.suron
+
+deploy:
+  stage: deploy
+  image: node:20
+  only:
+    - main
+  script:
+    - npm run deploy
+  environment:
+    name: production
+    url: https://my-app.com
+```
+
+## CircleCI Integration
+
+```yaml
+version: 2.1
+
+jobs:
+  deploy:
+    docker:
+      - image: cimg/node:20.0
+    steps:
+      - checkout
+      
+      - run:
+          name: Install Suron CLI
+          command: npm install -g @suronai/cli
+      
+      - run:
+          name: Configure Suron
+          command: |
+            mkdir -p ~/.suron
+            echo '{"workerUrl":"'"$VAULT_WORKER_URL"'","token":"'"$VAULT_CLI_TOKEN"'"}' > ~/.suron/auth.json
+      
+      - run:
+          name: Encrypt secrets
+          command: suron encrypt --app my-app --yes
+      
+      - run:
+          name: Deploy
+          command: npm run deploy
+
+workflows:
+  version: 2
+  build-and-deploy:
+    jobs:
+      - deploy:
+          filters:
+            branches:
+              only: main
+```
+
+## Docker Build Integration
+
+### Multi-stage Dockerfile
+
+```dockerfile
+# Stage 1: Decrypt secrets during build
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+# Install Suron CLI
+RUN npm install -g @suronai/cli
+
+# Copy source
+COPY package*.json ./
+COPY .env.suron ./
+
+# Build arguments for auth
+ARG VAULT_WORKER_URL
+ARG VAULT_CLI_TOKEN
+ARG VAULT_APP_ID
+
+# Configure Suron and decrypt for build time (if needed)
+RUN mkdir -p ~/.suron && \
+    echo '{"workerUrl":"'"$VAULT_WORKER_URL"'","token":"'"$VAULT_CLI_TOKEN"'"}' > ~/.suron/auth.json
+
+RUN npm ci
+COPY . .
+RUN npm run build
+
+# Stage 2: Runtime with SDK
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Copy built artifacts
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/package*.json ./
+
+# Install production dependencies including SDK
+RUN npm ci --production
+
+# Runtime environment variables (set in deployment platform)
+ENV VAULT_WORKER_URL=
+ENV VAULT_ACCESS_TOKEN=
+ENV VAULT_APP_ID=
+
+CMD ["node", "dist/index.js"]
+```
+
+### Docker Compose for Development
+
+```yaml
+version: '3.8'
+
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - VAULT_WORKER_URL=${VAULT_WORKER_URL}
+      - VAULT_ACCESS_TOKEN=${VAULT_ACCESS_TOKEN}
+      - VAULT_APP_ID=my-app
+    env_file:
+      - .env.local  # Non-vault vars only
+```
+
+## Best Practices
+
+<Accordion title="Security">
+  - Never log `VAULT_CLI_TOKEN` or `VAULT_ACCESS_TOKEN` in CI output
+  - Mark secrets as "masked" in your CI platform
+  - Use separate tokens for different environments (dev/staging/prod)
+  - Rotate CLI tokens quarterly
+  - Revoke tokens immediately when team members leave
+</Accordion>
+
+<Accordion title="Reliability">
+  - Pin Suron CLI version: `npm install -g @suronai/cli@1.0.0`
+  - Cache `node_modules` to speed up builds
+  - Set reasonable timeouts for approval steps
+  - Use `--yes` flag to prevent hanging on prompts
+  - Test encryption locally before pushing to CI
+</Accordion>
+
+<Accordion title="Workflow">
+  - Encrypt secrets in CI only when `.env` changes
+  - Commit `.env.suron` changes with `[skip ci]` to avoid loops
+  - Use branch protection to prevent direct commits to main
+  - Require PR approval before merging secret changes
+  - Document the approval process in your team wiki
+</Accordion>
+
+## Troubleshooting CI Failures
+
+<Accordion title="Authentication failed in CI">
+  **Symptom**: `Error: Invalid username or password` or `Authentication failed`
+
+  **Solution**:
+  - Verify `VAULT_CLI_TOKEN` secret is set correctly
+  - Check token hasn't expired or been revoked
+  - Ensure `~/.suron/auth.json` is created before running commands
+  - Confirm `VAULT_WORKER_URL` matches your worker endpoint
+</Accordion>
+
+<Accordion title="Missing --app parameter">
+  **Symptom**: `--app name is required in non-interactive mode`
+
+  **Solution**:
+  - Always provide `--app` explicitly in CI:
+    ```bash
+    suron encrypt --app my-app --yes
+    ```
+  - Or set in `.env.suron`:
+    ```env
+    VAULT_APP=my-app
+    ```
+</Accordion>
+
+<Accordion title="Deployment fails after key rotation">
+  **Symptom**: App crashes with `Failed to decrypt` after rotation
+
+  **Solution**:
+  - Redeploy immediately after rotation - old keys are invalidated
+  - Use CI/CD webhooks to trigger automatic redeployment
+  - Consider blue-green deployments for zero-downtime rotation
+</Accordion>
+
+## Next Steps
+
+- Review [troubleshooting guide](/guides/troubleshooting) for common issues
+- Set up [trusted restarts](/guides/migration#permit-persistence) in production
+- Configure [hot-reload](/sdk/hot-reload) to update secrets without redeployment

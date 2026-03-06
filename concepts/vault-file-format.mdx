@@ -1,0 +1,682 @@
+---
+title: 'Vault File Format'
+description: 'Technical specification of the .env.suron encrypted file format'
+icon: 'file-code'
+---
+
+## File Structure
+
+The `.env.suron` file uses a subset of the `.env` format with encrypted values:
+
+```bash .env.suron
+# Encrypted with @suronai/cli
+VAULT_APP=my-app
+DATABASE_URL=enc:sv1:YWJjMTIzZGVmNDU2Nzg5MGFiY2RlZjEyMzQ1Njc4OTA...
+API_KEY=enc:sv1:MTIzNDU2Nzg5MGFiY2RlZjEyMzQ1Njc4OTBhYmNkZWY...
+DEBUG_MODE=true
+```
+
+### Line Types
+
+<AccordionGroup>
+  <Accordion title="Comments">
+    Lines starting with `#` are comments and ignored:
+    
+    ```bash
+    # This is a comment
+    # Encrypted with @suronai/cli
+    ```
+  </Accordion>
+
+  <Accordion title="Blank Lines">
+    Empty lines are preserved but ignored:
+    
+    ```bash
+    DATABASE_URL=enc:sv1:...
+    
+    API_KEY=enc:sv1:...
+    ```
+  </Accordion>
+
+  <Accordion title="VAULT_APP (Metadata)">
+    Special key that identifies the app:
+    
+    ```bash
+    VAULT_APP=my-app
+    ```
+    
+    - Not encrypted (plaintext)
+    - Used by CLI to resolve `--app` flag
+    - Used by SDK in older versions (now requires `VAULT_APP_ID` env var)
+    - Safe to commit (no sensitive data)
+  </Accordion>
+
+  <Accordion title="Encrypted Secrets">
+    Key-value pairs with `enc:sv1:` prefix:
+    
+    ```bash
+    DATABASE_URL=enc:sv1:YWJjMTIzZGVmNDU2Nzg5MGFiY2RlZjEyMzQ1Njc4OTA...
+    ```
+    
+    - `DATABASE_URL` - The key (plaintext)
+    - `enc:sv1:` - Encryption prefix (version marker)
+    - `YWJj...` - Base64-encoded encrypted payload
+  </Accordion>
+
+  <Accordion title="Plain Values">
+    Key-value pairs without `enc:sv1:` prefix:
+    
+    ```bash
+    DEBUG_MODE=true
+    NODE_ENV=production
+    ```
+    
+    - Not encrypted (plaintext)
+    - Passed through as-is by SDK
+    - Useful for non-sensitive config
+  </Accordion>
+</AccordionGroup>
+
+## Encryption Prefix Format
+
+### `enc:sv1:` Breakdown
+
+| Part | Meaning | Purpose |
+|------|---------|----------|
+| `enc` | Encrypted | Distinguishes from plain values |
+| `:` | Separator | Delimiter |
+| `sv1` | Suron Vault, version 1 | Format version (future-proof) |
+| `:` | Separator | Delimiter |
+| `base64...` | Encrypted payload | See [Payload Structure](#payload-structure) |
+
+### Version History
+
+| Version | Status | Changes |
+|---------|--------|----------|
+| `sv1` | Current | AES-256-GCM with scrypt KDF |
+| `sv2` | Future | Reserved for algorithm upgrades |
+
+<Info>
+  The `enc:sv1:` prefix allows the SDK to detect encryption format and handle multiple versions gracefully. Future versions could use Argon2, ChaCha20-Poly1305, or post-quantum algorithms without breaking existing vaults.
+</Info>
+
+## Payload Structure
+
+The base64 payload contains a binary concatenation of cryptographic components:
+
+```
+base64(salt || iv || authTag || ciphertext)
+```
+
+### Binary Layout
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                         Base64 Payload                       │
+└─────────────────────────────────────────────────────────────┘
+         │
+         └──> Decoded to binary:
+
+┌────────┬────────┬────────┬──────────────────────────────────┐
+│  Salt  │   IV   │AuthTag │         Ciphertext               │
+│ 32 B   │  16 B  │  16 B  │         Variable                 │
+└────────┴────────┴────────┴──────────────────────────────────┘
+  0-31    32-47    48-63    64-end
+```
+
+| Offset | Length | Component | Purpose |
+|--------|--------|-----------|----------|
+| 0 | 32 bytes | Salt | Key derivation (scrypt input) |
+| 32 | 16 bytes | IV (Initialization Vector) | AES-GCM randomness |
+| 48 | 16 bytes | Auth Tag | GCM authentication tag |
+| 64 | Variable | Ciphertext | Encrypted secret value |
+
+### Implementation
+
+<CodeGroup>
+
+```javascript Encryption
+import { createCipheriv, randomBytes, scryptSync } from 'crypto'
+
+const ALGO      = 'aes-256-gcm'
+const SALT_LEN  = 32
+const IV_LEN    = 16
+const TAG_LEN   = 16
+const KEY_LEN   = 32
+const ENC_PREFIX = 'enc:sv1:'
+
+function deriveKey(masterKey, salt) {
+  return scryptSync(masterKey, salt, KEY_LEN)
+}
+
+export function encrypt(plaintext, masterKey) {
+  const salt   = randomBytes(SALT_LEN)  // 32 bytes
+  const iv     = randomBytes(IV_LEN)    // 16 bytes
+  const key    = deriveKey(masterKey, salt)
+  const cipher = createCipheriv(ALGO, key, iv)
+  const enc    = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()])
+  const tag    = cipher.getAuthTag()    // 16 bytes
+  const raw    = Buffer.concat([salt, iv, tag, enc]).toString('base64')
+  return `${ENC_PREFIX}${raw}`
+}
+```
+
+```javascript Decryption
+import { createDecipheriv } from 'crypto'
+
+export function decrypt(ciphertext, masterKey) {
+  // Strip prefix if present
+  const raw   = ciphertext.startsWith(ENC_PREFIX) 
+                  ? ciphertext.slice(ENC_PREFIX.length) 
+                  : ciphertext
+  const buf   = Buffer.from(raw, 'base64')
+  
+  // Extract components
+  const salt  = buf.subarray(0, SALT_LEN)                          // 0-31
+  const iv    = buf.subarray(SALT_LEN, SALT_LEN + IV_LEN)          // 32-47
+  const tag   = buf.subarray(SALT_LEN + IV_LEN, SALT_LEN + IV_LEN + TAG_LEN)  // 48-63
+  const enc   = buf.subarray(SALT_LEN + IV_LEN + TAG_LEN)          // 64-end
+  
+  // Derive key and decrypt
+  const key   = deriveKey(masterKey, salt)
+  const dc    = createDecipheriv(ALGO, key, iv)
+  dc.setAuthTag(tag)
+  return dc.update(enc).toString('utf8') + dc.final('utf8')
+}
+```
+
+```javascript Detection
+export function isEncrypted(value) {
+  return typeof value === 'string' && value.startsWith(ENC_PREFIX)
+}
+```
+
+</CodeGroup>
+
+## Cryptographic Details
+
+### AES-256-GCM
+
+**Algorithm:** Advanced Encryption Standard (AES) with 256-bit key in Galois/Counter Mode (GCM)
+
+**Properties:**
+- **Confidentiality** - Ciphertext is indistinguishable from random
+- **Authenticity** - Auth tag prevents tampering (AEAD)
+- **Performance** - Hardware-accelerated on modern CPUs (AES-NI)
+
+**Mode:** GCM (Galois/Counter Mode)
+- Stream cipher mode (no padding needed)
+- Authenticated encryption (combined confidentiality + integrity)
+- Parallelizable (fast encryption/decryption)
+
+### Scrypt Key Derivation
+
+**Function:** `scryptSync(password, salt, keyLength, options)`
+
+**Default Parameters:**
+```javascript
+N = 16384  // CPU/memory cost (2^14)
+r = 8      // Block size
+p = 1      // Parallelization factor
+```
+
+**Memory Cost:** ~16 MB per derivation
+
+**Why Scrypt?**
+- Memory-hard (resistant to GPU/ASIC brute force)
+- Configurable cost (can increase over time)
+- Available in Node.js stdlib (no dependencies)
+
+**Alternative KDFs:**
+
+| KDF | Security | Performance | Node.js Support |
+|-----|----------|-------------|------------------|
+| PBKDF2 | ⚠️ Weak (GPU-vulnerable) | Fast | ✅ Stdlib |
+| bcrypt | ✅ Good | Medium | ❌ Requires package |
+| scrypt | ✅ Excellent | Medium | ✅ Stdlib |
+| Argon2 | ✅ Best | Medium | ❌ Requires package |
+
+<Warning>
+  Scrypt parameters are not stored in the encrypted payload. Changing default parameters requires a new format version (e.g., `enc:sv2:`).
+</Warning>
+
+### Randomness Sources
+
+```javascript
+import { randomBytes } from 'crypto'
+
+const salt = randomBytes(32)  // Cryptographically secure random
+const iv   = randomBytes(16)  // Cryptographically secure random
+```
+
+**Source:** Node.js `crypto.randomBytes()`
+- Uses OS entropy (`/dev/urandom` on Linux, `CryptGenRandom` on Windows)
+- Blocks until entropy pool is sufficiently random
+- Suitable for cryptographic use (not `Math.random()`)
+
+## Why It's Safe to Commit
+
+### Security Analysis
+
+For an attacker who obtains `.env.suron` from git:
+
+1. **They have:**
+   - Encrypted ciphertext
+   - Salt (public, not secret)
+   - IV (public, not secret)
+   - Auth tag (public, not secret)
+
+2. **They need:**
+   - Master key (64 hex chars = 256 bits)
+
+3. **Attack vectors:**
+
+   **Brute force the master key:**
+   - Keyspace: 2^256 (115 quattuorvigintillion)
+   - At 1 billion keys/second: 10^59 years
+   - Conclusion: Infeasible
+
+   **Brute force scrypt-derived key:**
+   - Keyspace: Still 2^256 (scrypt output is 256 bits)
+   - Scrypt memory cost slows each attempt to ~10ms
+   - At 100 attempts/second: 10^62 years
+   - Conclusion: Even more infeasible
+
+   **Compromise storage systems:**
+   - Cloudflare KV: Get Cloudflare half + vault file, still need Convex half
+   - Convex: Get Convex half, still need Cloudflare half + vault file
+   - Both: Can decrypt (but requires two independent breaches)
+
+<Info>
+  The `.env.suron` file alone is cryptographically useless to an attacker. Only the split master key (stored in Cloudflare KV + Convex) can decrypt it.
+</Info>
+
+### Git History Safety
+
+Even if you accidentally commit `.env` (plaintext) then later encrypt:
+
+```bash
+# Oops, committed plaintext
+git add .env
+git commit -m "Add secrets"
+
+# Fix: encrypt and remove .env
+suron encrypt
+git rm .env
+git add .env.suron
+git commit -m "Migrate to Suron Vault"
+```
+
+**Problem:** `.env` is still in git history
+
+**Solution:** Rotate master key
+
+```bash
+suron rotate
+# Generates new master key
+# Re-encrypts all secrets with new key
+# Old master key (in git history) is now useless
+```
+
+**Why this works:**
+- Old commits have `.env` encrypted with old master key
+- Old master key is now revoked (not in Cloudflare KV or Convex)
+- Attacker can't decrypt old commits without old key halves
+
+<Warning>
+  If you ever commit plaintext secrets to git, **always rotate the secrets themselves** (database passwords, API keys, etc.), not just the master key. Git history is permanent unless you force-push rewritten history.
+</Warning>
+
+## VAULT_APP Identifier
+
+### Purpose
+
+The `VAULT_APP` key serves multiple purposes:
+
+1. **App identification** - Associates vault file with backend state
+2. **CLI convenience** - Avoids `--app` flag on every command
+3. **Readability** - Anyone can see which app this vault is for
+4. **Compatibility** - Standard `.env` parsers can read it
+
+### Format
+
+```bash
+VAULT_APP=my-app
+```
+
+**Allowed characters:** `a-z`, `A-Z`, `0-9`, `-`, `_`
+
+**Examples:**
+```bash
+VAULT_APP=my-api
+VAULT_APP=prod-workers
+VAULT_APP=staging_db
+```
+
+### Parsing
+
+<CodeGroup>
+
+```javascript CLI (vault-file.js)
+export function readAppIdFromVault() {
+  const raw = readFileSync('.env.suron', 'utf8')
+  for (const line of raw.split('\n')) {
+    const t = line.trim()
+    if (t.startsWith('VAULT_APP=')) {
+      return t.replace('VAULT_APP=', '').trim()
+    }
+    // Backwards compatibility with old comment format
+    if (t.startsWith('# App:')) {
+      return t.replace('# App:', '').trim()
+    }
+  }
+  return null
+}
+```
+
+```javascript SDK (vault-file.js)
+export function parseVaultFile(raw) {
+  const secrets = {}
+  for (const line of raw.split('\n')) {
+    const t = line.trim()
+    if (!t || t.startsWith('#')) continue
+    const eq = t.indexOf('=')
+    if (eq === -1) continue
+    const key = t.substring(0, eq).trim()
+    if (key === 'VAULT_APP') continue  // Skip metadata key
+    secrets[key] = t.substring(eq + 1).trim()
+  }
+  return secrets
+}
+```
+
+</CodeGroup>
+
+<Note>
+  The SDK skips `VAULT_APP` when loading secrets. It's metadata, not a secret to inject into `process.env`.
+</Note>
+
+## Example Vault File
+
+### Full Example
+
+```bash .env.suron
+# Encrypted with @suronai/cli
+VAULT_APP=my-production-api
+
+# Database
+DATABASE_URL=enc:sv1:YWJjMTIzZGVmNDU2Nzg5MGFiY2RlZjEyMzQ1Njc4OTBhYmNkZWYxMjM0NTY3ODkwYWJjZGVmMTIzNDU2Nzg5MGFiY2RlZg==
+DATABASE_POOL_SIZE=10
+
+# API Keys
+STRIPE_SECRET_KEY=enc:sv1:MTIzNDU2Nzg5MGFiY2RlZjEyMzQ1Njc4OTBhYmNkZWYxMjM0NTY3ODkwYWJjZGVmMTIzNDU2Nzg5MGFiY2RlZjEyMzQ1Njc4OTA=
+SENDGRID_API_KEY=enc:sv1:cXdlcnR5dWlvcGFzZGZnaGprbHp4Y3Zibm1xd2VydHl1aW9wYXNkZmdoamtsenhjdmJubXF3ZXJ0eXVpb3Bhc2RmZ2hqa2x6eGN2Ym5t
+
+# AWS
+AWS_ACCESS_KEY_ID=enc:sv1:enhjdmJubXF3ZXJ0eXVpb3Bhc2RmZ2hqa2x6eGN2Ym5tcXdlcnR5dWlvcGFzZGZnaGprbHp4Y3Zibm1xd2VydHl1aW9wYXNkZmdoamts
+AWS_SECRET_ACCESS_KEY=enc:sv1:YXNkZmdoamtsenhjdmJubXF3ZXJ0eXVpb3Bhc2RmZ2hqa2x6eGN2Ym5tcXdlcnR5dWlvcGFzZGZnaGprbHp4Y3Zibm1xd2VydHl1aQ==
+AWS_REGION=us-east-1
+
+# Non-sensitive config
+NODE_ENV=production
+PORT=3000
+LOG_LEVEL=info
+```
+
+### After Decryption (in process.env)
+
+```javascript
+{
+  DATABASE_URL: 'postgresql://user:pass@host:5432/db',
+  DATABASE_POOL_SIZE: '10',
+  STRIPE_SECRET_KEY: 'sk_live_51abc123...',
+  SENDGRID_API_KEY: 'SG.abc123...',
+  AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE',
+  AWS_SECRET_ACCESS_KEY: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+  AWS_REGION: 'us-east-1',
+  NODE_ENV: 'production',
+  PORT: '3000',
+  LOG_LEVEL: 'info'
+}
+```
+
+## File Operations
+
+### Reading
+
+```javascript CLI/src/lib/vault-file.js
+import { readFileSync } from 'fs'
+
+export function readVault() {
+  if (!existsSync('.env.suron')) return ''
+  return readFileSync('.env.suron', 'utf8')
+}
+```
+
+### Writing
+
+```javascript CLI/src/lib/vault-file.js
+import { writeFileSync } from 'fs'
+
+export function writeVault(appId, lines) {
+  const header = `# Encrypted with @suronai/cli\nVAULT_APP=${appId}\n`
+  const body   = lines
+    .filter(l => {
+      const t = l.trim()
+      // Remove old header comments and duplicate VAULT_APP lines
+      return !(
+        t.startsWith('# Encrypted with') || 
+        t.startsWith('# App:') || 
+        t.startsWith('VAULT_APP=')
+      )
+    })
+    .join('\n')
+  writeFileSync('.env.suron', header + body.trimStart().trimEnd() + '\n')
+}
+```
+
+### Parsing
+
+```javascript CLI/src/lib/vault-file.js
+export function parseLines(raw) {
+  return raw.split('\n').map(line => {
+    const t = line.trim()
+    
+    // Blank or comment
+    if (!t || t.startsWith('#')) {
+      return { type: 'raw', raw: line }
+    }
+    
+    // Not a key=value pair
+    const eq = t.indexOf('=')
+    if (eq === -1) {
+      return { type: 'raw', raw: line }
+    }
+    
+    const key = t.substring(0, eq).trim()
+    const val = t.substring(eq + 1).trim()
+    
+    // Metadata key
+    if (key === 'VAULT_APP') {
+      return { type: 'meta', key, val }
+    }
+    
+    // Secret (encrypted or plain)
+    return { type: 'secret', key, encryptedValue: val }
+  })
+}
+```
+
+## Migration Guide
+
+### From `.env` to `.env.suron`
+
+<Steps>
+  <Step title="Install CLI">
+    ```bash
+    npm install -g @suronai/cli
+    ```
+  </Step>
+
+  <Step title="Login and Initialize">
+    ```bash
+    suron login
+    suron init --app my-app
+    ```
+  </Step>
+
+  <Step title="Encrypt Existing .env">
+    ```bash
+    suron encrypt
+    # Creates .env.suron from .env
+    # Auto-uploads to Cloudflare KV
+    ```
+  </Step>
+
+  <Step title="Verify">
+    ```bash
+    cat .env.suron
+    # Should show enc:sv1: prefixed values
+    
+    suron list
+    # Should list all keys
+    ```
+  </Step>
+
+  <Step title="Commit">
+    ```bash
+    git add .env.suron
+    git commit -m "Add encrypted secrets"
+    git push
+    ```
+  </Step>
+
+  <Step title="Update Application">
+    ```javascript
+    import { vault } from '@suronai/sdk'
+    
+    await vault.load()
+    // Now process.env has all secrets
+    ```
+  </Step>
+
+  <Step title="Deploy with Env Vars">
+    ```bash
+    VAULT_WORKER_URL=https://...
+    VAULT_ACCESS_TOKEN=xxx
+    VAULT_APP_ID=my-app
+    ```
+  </Step>
+
+  <Step title="Remove Plaintext .env">
+    ```bash
+    git rm .env
+    echo '.env' >> .gitignore
+    git commit -m "Remove plaintext secrets"
+    git push
+    ```
+  </Step>
+
+  <Step title="Rotate Secrets (Recommended)">
+    ```bash
+    # Rotate actual secrets (database passwords, API keys)
+    # Update .env locally, then:
+    suron encrypt --yes
+    ```
+  </Step>
+</Steps>
+
+### From `.env.vault` (Dotenv Vault)
+
+If you're migrating from Dotenv Vault:
+
+```bash
+# Dotenv Vault format
+DATABASE_URL=encrypted:vault:v1:abc123...
+
+# Suron Vault format
+DATABASE_URL=enc:sv1:YWJjMTIz...
+```
+
+Migration steps:
+
+1. Decrypt `.env.vault` to `.env` using Dotenv Vault CLI
+2. Follow [From `.env` to `.env.suron`](#from-env-to-envsuron) above
+3. Rotate all secrets (Dotenv Vault keys are now revoked)
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Error: Failed to decrypt">
+    **Cause:** Master key has changed or ciphertext is corrupted
+    
+    **Solutions:**
+    - Check if key was rotated: `suron rotate` invalidates old encrypted values
+    - Verify vault file integrity: `cat .env.suron` (should be valid base64)
+    - Re-encrypt from source: `suron encrypt --file .env`
+  </Accordion>
+
+  <Accordion title="Error: VAULT_APP not found">
+    **Cause:** `.env.suron` is missing or malformed
+    
+    **Solutions:**
+    - Check file exists: `ls -la .env.suron`
+    - Check format: First non-comment line should be `VAULT_APP=...`
+    - Regenerate: `suron init --app my-app` then `suron encrypt`
+  </Accordion>
+
+  <Accordion title="Secrets not updating after suron add">
+    **Cause:** Running app hasn't hot-reloaded yet
+    
+    **Solutions:**
+    - Wait up to 30s for next heartbeat
+    - Check logs for "Secrets updated — reloading in-place"
+    - Verify `vaultVersion` incremented: Check Convex dashboard
+  </Accordion>
+
+  <Accordion title="Base64 decode error">
+    **Cause:** Invalid characters in encrypted value
+    
+    **Solutions:**
+    - Don't manually edit `enc:sv1:` values
+    - Check for line breaks inside base64 string (should be one line)
+    - Re-encrypt: `suron add KEY value`
+  </Accordion>
+</AccordionGroup>
+
+## Security Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Never Commit .env" icon="ban">
+    Always add `.env` to `.gitignore`. Only commit `.env.suron`.
+  </Card>
+  
+  <Card title="Rotate After Leaks" icon="arrows-rotate">
+    If `.env` was ever committed, run `suron rotate` immediately.
+  </Card>
+  
+  <Card title="Use Strong Master Keys" icon="key">
+    Don't manually create master keys. Use `suron init` (256-bit random).
+  </Card>
+  
+  <Card title="Audit Git History" icon="magnifying-glass">
+    Check for accidental plaintext commits: `git log -p -- .env`
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="How It Works" icon="diagram-project" href="/concepts/how-it-works">
+    Complete flow from encrypt to decrypt
+  </Card>
+  <Card title="Security Model" icon="shield-halved" href="/concepts/security-model">
+    Deep dive into split-key architecture
+  </Card>
+  <Card title="CLI Reference" icon="terminal" href="/cli/commands">
+    Full command reference
+  </Card>
+  <Card title="SDK Reference" icon="code" href="/sdk/vault">
+    Full API documentation for @suronai/sdk
+  </Card>
+</CardGroup>

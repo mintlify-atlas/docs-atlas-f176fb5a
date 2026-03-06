@@ -1,0 +1,559 @@
+---
+title: Worker Authentication
+description: Token types, authentication flows, and security model
+---
+
+The Suron Worker uses two distinct token types to authenticate different types of clients.
+
+## Token Types
+
+### VAULT_ACCESS_TOKEN
+
+Server-side authentication token for SDK operations.
+
+<ParamField path="VAULT_ACCESS_TOKEN" type="string" required>
+  Secret token used by SDK running on your application servers
+</ParamField>
+
+**Purpose**: 
+- Authenticates SDK requests from your application servers
+- Allows servers to fetch vault data, request access, send heartbeats
+
+**Security**:
+- **Never commit to version control**
+- Store in server environment variables only
+- Never expose to client-side code or browsers
+- Rotate periodically for security
+
+**Configured**: 
+- Set as Worker secret/environment variable
+- Deployed via `wrangler secret put VAULT_ACCESS_TOKEN`
+
+**Usage**:
+```javascript
+// In your server's .env file
+VAULT_ACCESS_TOKEN=your-secret-access-token-here
+
+// SDK automatically sends this in headers
+const res = await fetch(`${workerUrl}/heartbeat`, {
+  headers: { 'x-vault-token': process.env.VAULT_ACCESS_TOKEN }
+})
+```
+
+**Verified By**: `requireToken()` function in worker/src/utils.js:13
+
+---
+
+### VAULT_CLI_TOKEN
+
+Administrative token for CLI operations.
+
+<ParamField path="VAULT_CLI_TOKEN" type="string" required>
+  Secret token used by Suron CLI for admin operations
+</ParamField>
+
+**Purpose**:
+- Authenticates CLI commands like `suron init`, `suron upload`, `suron rotate`
+- Protects administrative endpoints that modify vault state
+
+**Security**:
+- CLI never stores this token directly
+- User authenticates with username/password via `/admin/login`
+- Login returns `VAULT_CLI_TOKEN` for session use
+- Token stored temporarily in CLI session
+
+**Configured**:
+- Set as Worker secret/environment variable
+- Deployed via `wrangler secret put VAULT_CLI_TOKEN`
+
+**Authentication Flow**:
+```javascript
+// 1. CLI sends username/password
+POST /admin/login
+{
+  "username": "admin",
+  "password": "secure-password"
+}
+
+// 2. Worker verifies credentials and returns token
+{
+  "token": "vault-cli-token-value"  // This IS the VAULT_CLI_TOKEN
+}
+
+// 3. CLI uses token for subsequent requests
+POST /admin/upload
+Headers: { 'x-vault-token': 'vault-cli-token-value' }
+```
+
+**Verified By**: `requireCliToken()` function in worker/src/utils.js:22
+
+---
+
+## Authentication Implementation
+
+### Token Validation
+
+Both token types are validated using the same header:
+
+```javascript
+Headers: {
+  'x-vault-token': '<token-value>'
+}
+```
+
+### requireToken() - SDK Routes
+
+```javascript
+export function requireToken(request, env) {
+  const t = request.headers.get('x-vault-token')
+  if (!t || t !== env.VAULT_ACCESS_TOKEN) return err(401, 'Unauthorized')
+  return null
+}
+```
+
+**Used By**:
+- `/fetch-vault`
+- `/request`
+- `/resume`
+- `/status`
+- `/keys`
+- `/loaded`
+- `/heartbeat`
+
+**Source**: worker/src/utils.js:13
+
+---
+
+### requireCliToken() - CLI Routes
+
+```javascript
+export function requireCliToken(request, env) {
+  const t = request.headers.get('x-vault-token')
+  if (!t || t !== env.VAULT_CLI_TOKEN) {
+    return err(401, 'Unauthorized — run: suron login')
+  }
+  return null
+}
+```
+
+**Used By**:
+- `/admin/init`
+- `/admin/keys`
+- `/admin/rotate`
+- `/admin/upload`
+
+**Source**: worker/src/utils.js:22
+
+---
+
+## Route Protection
+
+The Worker uses wrapper functions to apply authentication:
+
+### SDK Route Wrapper
+
+```javascript
+function sdkRoute(request, env, body, handler) {
+  const e = requireToken(request, env)
+  return e ?? handler(body, env)
+}
+
+// Usage
+if (path === '/heartbeat') return sdkRoute(request, env, body, handleHeartbeat)
+```
+
+**Source**: worker/src/index.js:42
+
+---
+
+### CLI Route Wrapper
+
+```javascript
+function cliRoute(request, env, body, handler) {
+  const e = requireCliToken(request, env)
+  return e ?? handler(body, env)
+}
+
+// Usage
+if (path === '/admin/upload') return cliRoute(request, env, body, handleAdminUpload)
+```
+
+**Source**: worker/src/index.js:47
+
+---
+
+## Authentication Flows
+
+### SDK Authentication Flow
+
+<Steps>
+  <Step title="Configure Token">
+    Set `VAULT_ACCESS_TOKEN` in server environment:
+    ```bash
+    VAULT_ACCESS_TOKEN=your-secret-token
+    ```
+  </Step>
+  
+  <Step title="SDK Sends Token">
+    SDK automatically includes token in all requests:
+    ```javascript
+    headers: { 'x-vault-token': process.env.VAULT_ACCESS_TOKEN }
+    ```
+  </Step>
+  
+  <Step title="Worker Validates">
+    Worker compares received token with `env.VAULT_ACCESS_TOKEN`
+  </Step>
+  
+  <Step title="Grant or Deny">
+    - Match: Request proceeds to handler
+    - Mismatch: Return `401 Unauthorized`
+  </Step>
+</Steps>
+
+---
+
+### CLI Authentication Flow
+
+<Steps>
+  <Step title="Login Command">
+    User runs `suron login` and enters credentials
+  </Step>
+  
+  <Step title="Verify Credentials">
+    Worker checks username/password against `ADMIN_USERNAME` and `ADMIN_PASSWORD`:
+    ```javascript
+    if (username !== env.ADMIN_USERNAME || password !== env.ADMIN_PASSWORD) {
+      return err(401, 'Invalid username or password')
+    }
+    ```
+  </Step>
+  
+  <Step title="Return Token">
+    On success, Worker returns `VAULT_CLI_TOKEN`:
+    ```javascript
+    return json({ token: env.VAULT_CLI_TOKEN })
+    ```
+  </Step>
+  
+  <Step title="Store Session">
+    CLI stores token in session file (e.g., `~/.suron/session.json`)
+  </Step>
+  
+  <Step title="Use Token">
+    Subsequent CLI commands send token in headers:
+    ```javascript
+    headers: { 'x-vault-token': '<stored-token>' }
+    ```
+  </Step>
+</Steps>
+
+**Source**: worker/src/index.js:54
+
+---
+
+## Public Routes
+
+Certain routes do NOT require token authentication:
+
+### POST /admin/login
+
+Authentication endpoint itself - requires username/password instead.
+
+```javascript
+if (path === '/admin/login') return handleAdminLogin(body, env)
+// No token check!
+```
+
+**Source**: worker/src/index.js:21
+
+---
+
+### POST /webhook
+
+Telegram webhook endpoint - authenticated via Telegram's webhook mechanism.
+
+```javascript
+if (path === '/webhook' && method === 'POST') {
+  return handleTelegramWebhook(request, env)
+}
+// No token check!
+```
+
+**Source**: worker/src/index.js:11
+
+---
+
+## Security Best Practices
+
+### Token Generation
+
+Generate cryptographically secure random tokens:
+
+```bash
+# Generate VAULT_ACCESS_TOKEN
+openssl rand -hex 32
+
+# Generate VAULT_CLI_TOKEN  
+openssl rand -hex 32
+```
+
+### Token Storage
+
+<Warning>
+NEVER commit tokens to version control or share them publicly.
+</Warning>
+
+**Server (VAULT_ACCESS_TOKEN)**:
+- Store in server environment variables
+- Use secrets management (AWS Secrets Manager, Vault, etc.)
+- Rotate periodically
+
+**Worker Secrets**:
+```bash
+wrangler secret put VAULT_ACCESS_TOKEN
+wrangler secret put VAULT_CLI_TOKEN
+wrangler secret put ADMIN_USERNAME
+wrangler secret put ADMIN_PASSWORD
+```
+
+**CLI Session**:
+- Token stored in `~/.suron/session.json` (or similar)
+- File should have restricted permissions (`chmod 600`)
+- Automatically cleared on `suron logout`
+
+---
+
+### Token Rotation
+
+<Steps>
+  <Step title="Generate New Tokens">
+    Create new random tokens for both `VAULT_ACCESS_TOKEN` and `VAULT_CLI_TOKEN`
+  </Step>
+  
+  <Step title="Update Worker">
+    Deploy new tokens to Worker:
+    ```bash
+    wrangler secret put VAULT_ACCESS_TOKEN
+    wrangler secret put VAULT_CLI_TOKEN
+    ```
+  </Step>
+  
+  <Step title="Update Servers">
+    Update `VAULT_ACCESS_TOKEN` in all server environments
+  </Step>
+  
+  <Step title="Re-login CLI">
+    Run `suron logout && suron login` to get new session
+  </Step>
+  
+  <Step title="Restart Servers">
+    Restart servers to pick up new token
+  </Step>
+</Steps>
+
+---
+
+## Permit Tokens
+
+Permit tokens are distinct from access tokens and enable trusted restarts.
+
+### What is a Permit Token?
+
+A temporary token issued after admin approval that allows servers to restart without re-approval.
+
+**Properties**:
+- 64-character hex string (32 random bytes)
+- Stored in RAM on server (not in env vars)
+- Expires after 24 hours
+- Invalidated on key rotation or manual revocation
+
+**Generation**:
+```javascript
+import { randomBytes } from 'crypto'
+
+const permitToken = randomBytes(32).toString('hex')
+```
+
+**Source**: worker/src/telegram.js:170
+
+---
+
+### Permit Token Flow
+
+<Steps>
+  <Step title="Admin Approves">
+    Admin clicks "Approve" in Telegram
+  </Step>
+  
+  <Step title="Generate Permit">
+    Worker generates random permit token
+  </Step>
+  
+  <Step title="Store Permit">
+    - Store in Convex app record
+    - Store in KV with 24h TTL for immediate polling access
+  </Step>
+  
+  <Step title="SDK Receives">
+    SDK polls `/status` and receives permit token
+  </Step>
+  
+  <Step title="Store in RAM">
+    SDK stores permit in memory (`_permitToken` variable)
+  </Step>
+  
+  <Step title="Use for Restart">
+    On next restart, SDK sends permit to `/resume` endpoint
+  </Step>
+</Steps>
+
+---
+
+### Permit Validation
+
+Permits are validated on `/resume` requests:
+
+```javascript
+const result = await db.validatePermit(env, appId, permitToken)
+
+if (!result.valid) {
+  return json({ 
+    ok: false, 
+    reason: result.reason,  // 'expired' | 'revoked' | 'invalid'
+    fallback: 'full_approval' 
+  })
+}
+```
+
+**Validation Checks**:
+1. Token matches stored permit for app
+2. Permit hasn't expired (< 24 hours old)
+3. Permit hasn't been revoked
+
+**Source**: worker/src/index.js:99
+
+---
+
+## Admin Verification (Telegram)
+
+Telegram admin commands verify user ID:
+
+```javascript
+function isAdmin(env, userId) {
+  return String(userId) === String(env.ADMIN_CHAT_ID)
+}
+```
+
+All webhook callbacks check:
+```javascript
+if (!isAdmin(env, userId)) {
+  await answer(env, cb.id, 'Unauthorized')
+  return json({ ok: true })
+}
+```
+
+**Source**: worker/src/telegram.js:4, worker/src/telegram.js:146
+
+---
+
+## Error Messages
+
+### SDK Token Errors
+
+**Missing Token**:
+```json
+{
+  "error": "Unauthorized"
+}
+```
+HTTP Status: `401`
+
+**Invalid Token**:
+```json
+{
+  "error": "Unauthorized"
+}
+```
+HTTP Status: `401`
+
+---
+
+### CLI Token Errors
+
+**Missing Token**:
+```json
+{
+  "error": "Unauthorized — run: suron login"
+}
+```
+HTTP Status: `401`
+
+**Invalid Credentials**:
+```json
+{
+  "error": "Invalid username or password"
+}
+```
+HTTP Status: `401`
+
+**Missing Config**:
+```json
+{
+  "error": "Auth not configured — set ADMIN_USERNAME and ADMIN_PASSWORD in Worker secrets"
+}
+```
+HTTP Status: `500`
+
+---
+
+## Complete Authentication Example
+
+### SDK Usage
+
+```javascript
+import { vault } from '@suronai/sdk'
+
+// .env file
+// VAULT_WORKER_URL=https://vault.workers.dev
+// VAULT_ACCESS_TOKEN=abc123...  ← Required for auth
+// VAULT_APP_ID=my-api-production
+
+await vault.load()
+// SDK automatically sends VAULT_ACCESS_TOKEN in all requests
+```
+
+---
+
+### CLI Usage
+
+```bash
+# First time: login with username/password
+$ suron login
+Worker URL: https://vault.workers.dev
+Username: admin
+Password: ********
+✓ Logged in successfully
+
+# Token now stored in ~/.suron/session.json
+# Subsequent commands use stored token
+
+$ suron upload
+# Sends request with x-vault-token header
+✓ Vault uploaded
+
+# Logout clears stored token
+$ suron logout
+✓ Logged out
+```
+
+---
+
+## Summary
+
+| Token Type | Used By | Authenticates | Stored In | Obtained Via |
+|------------|---------|---------------|-----------|-------------|
+| `VAULT_ACCESS_TOKEN` | SDK (servers) | `/fetch-vault`, `/request`, `/heartbeat`, etc. | Server env vars | Pre-configured |
+| `VAULT_CLI_TOKEN` | CLI (admin) | `/admin/init`, `/admin/upload`, etc. | CLI session file | `/admin/login` |
+| Permit Token | SDK (servers) | `/resume` (trusted restart) | RAM (server process) | Admin approval |
+| Admin Chat ID | Telegram bot | Webhook callbacks | Worker secrets | Telegram user ID |

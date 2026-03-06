@@ -1,0 +1,247 @@
+---
+title: suron encrypt
+description: Encrypt a .env file and push encrypted secrets to Suron Vault
+---
+
+The `encrypt` command reads a plaintext `.env` file, encrypts all secrets using your app's master key, writes them to `.env.suron`, and automatically pushes to your Suron Vault.
+
+## Usage
+
+```bash
+suron encrypt [--file path] [--app name] [--yes]
+```
+
+## Parameters
+
+<ParamField path="--file" type="string" default=".env">
+  Path to source env file. Can also be specified as a positional argument.
+</ParamField>
+
+<ParamField path="--app" type="string">
+  App name. If not provided, reads from `.env.suron` or prompts interactively.
+</ParamField>
+
+<ParamField path="--yes" type="boolean">
+  Non-interactive mode. Requires `--app` if not in `.env.suron`. Short form: `-y`
+</ParamField>
+
+## Examples
+
+### Encrypt Default `.env` File
+
+```bash
+suron encrypt
+```
+
+Output:
+
+```bash
+⋯ Encrypting secrets for myapp
+⋯ Pushing to Suron...
+✓ 5 secrets encrypted and pushed
+  App: myapp
+  Commit .env.suron — add .env to .gitignore
+```
+
+### Encrypt Custom File
+
+```bash
+suron encrypt --file .env.production
+```
+
+or as a positional argument:
+
+```bash
+suron encrypt .env.production
+```
+
+### Non-Interactive Mode
+
+```bash
+suron encrypt --app myapp --yes
+```
+
+## How It Works
+
+1. **Resolves app name** from `--app` flag, `.env.suron`, or interactive prompt
+2. **Fetches master key** from Worker (reconstructed from Convex + Cloudflare KV)
+3. **Reads source file** line by line
+4. **Encrypts each secret** using AES-256-GCM with the master key
+5. **Writes encrypted secrets** to `.env.suron`
+6. **Automatically pushes** to Worker via `POST /admin/upload`
+
+## Input File Format
+
+The source `.env` file should contain plaintext environment variables:
+
+```bash
+DATABASE_URL=postgres://user:pass@localhost/db
+API_KEY=sk_live_abc123
+SESSION_SECRET=my-secret-key
+
+# Comments are preserved
+DEBUG=true
+```
+
+## Output File Format
+
+The `.env.suron` file contains encrypted values with metadata:
+
+```bash
+# Encrypted with @suronai/cli
+VAULT_APP=myapp
+DATABASE_URL=enc:sv1:aGVsbG8gd29ybGQ...
+API_KEY=enc:sv1:c29tZXRoaW5nIHNl...
+SESSION_SECRET=enc:sv1:YW5vdGhlciBlbmM...
+
+# Comments are preserved
+DEBUG=enc:sv1:dHJ1ZQ...
+```
+
+Encrypted values use the `enc:sv1:` prefix followed by base64-encoded ciphertext.
+
+## Secret Filtering
+
+### Skipped Secrets
+
+Certain keys are automatically excluded from encryption:
+
+```bash
+⚠ Skipping VAULT_CLI_TOKEN — this key must never be committed to the vault
+```
+
+Current exclusions:
+- `VAULT_CLI_TOKEN`
+
+### Skipped Metadata
+
+These lines are automatically removed from the source before encryption:
+- Lines starting with `# Encrypted with`
+- Lines starting with `# App:`
+- `VAULT_APP=` lines
+
+This prevents duplicate metadata when re-encrypting.
+
+## Re-Encryption
+
+### Already Encrypted Values
+
+The command detects already-encrypted values (starting with `enc:sv1:`) and skips re-encryption:
+
+```bash
+# This line won't be double-encrypted
+API_KEY=enc:sv1:aGVsbG8...
+```
+
+This allows you to safely run `encrypt` multiple times.
+
+## Comment Preservation
+
+Comments and blank lines are preserved in the output:
+
+```bash
+# Database Configuration
+DATABASE_URL=postgres://...
+
+# API Keys
+API_KEY=sk_live_...
+```
+
+becomes:
+
+```bash
+# Encrypted with @suronai/cli
+VAULT_APP=myapp
+# Database Configuration
+DATABASE_URL=enc:sv1:...
+
+# API Keys
+API_KEY=enc:sv1:...
+```
+
+## Automatic Push
+
+After encryption, the command automatically uploads to your Worker:
+
+```bash
+⋯ Pushing to Suron...
+✓ 5 secrets encrypted and pushed
+```
+
+No separate `suron upload` step is required.
+
+## Error Cases
+
+### File Not Found
+
+```bash
+suron encrypt --file .env.staging
+```
+
+Output:
+
+```bash
+✗ File not found: .env.staging
+```
+
+### Missing App Name
+
+```bash
+suron encrypt --yes
+```
+
+Output:
+
+```bash
+✗ --app name is required in non-interactive mode
+```
+
+Solution: Either remove `--yes` for interactive mode, or provide `--app`:
+
+```bash
+suron encrypt --app myapp --yes
+```
+
+### Not Initialized
+
+```bash
+✗ App name not found — run: suron init --app yourapp
+```
+
+Solution: [Initialize first](/cli/commands/init)
+
+## Best Practices
+
+1. **Always encrypt before committing** - Never commit plaintext `.env` files
+2. **Review changes** before pushing encrypted vault
+3. **Keep `.env` local** - Ensure it's in `.gitignore`
+4. **Commit `.env.suron`** - This is safe to version control
+5. **Use environment-specific files** - e.g., `.env.staging`, `.env.production`
+
+## Workflow Example
+
+```bash
+# 1. Create plaintext secrets
+echo "DATABASE_URL=postgres://localhost/mydb" > .env
+echo "API_KEY=secret123" >> .env
+
+# 2. Encrypt and push
+suron encrypt
+
+# 3. Verify
+suron list
+
+# 4. Commit encrypted vault
+git add .env.suron
+git commit -m "Add encrypted secrets"
+
+# 5. Never commit .env
+git status # .env should not appear (in .gitignore)
+```
+
+## Related Commands
+
+- [suron init](/cli/commands/init) - Initialize app before encrypting
+- [suron add](/cli/commands/add) - Add individual secrets
+- [suron decrypt](/cli/commands/decrypt) - View decrypted values
+- [suron list](/cli/commands/list) - List all secrets

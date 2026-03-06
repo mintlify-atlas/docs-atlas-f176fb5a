@@ -1,0 +1,504 @@
+---
+title: Troubleshooting
+description: Common issues and solutions when using Suron Vault
+---
+
+Resolve common problems with Suron Vault deployment, authentication, and operation.
+
+## Authentication Issues
+
+<Accordion title="Invalid username or password during login">
+  **Symptom**
+  ```bash
+  $ suron login
+  Error: Invalid username or password
+  ```
+
+  **Causes & Solutions**
+  - **Wrong credentials**: Verify username and password with your admin
+  - **Worker URL incorrect**: Ensure the URL includes `https://` and matches your deployed worker
+  - **Worker not deployed**: Confirm your Cloudflare Worker is live and accessible
+  
+  **Verification**
+  ```bash
+  # Test worker health
+  curl https://suronai-vault.your-account.workers.dev/health
+  ```
+</Accordion>
+
+<Accordion title="Already logged in warning">
+  **Symptom**
+  ```bash
+  Already logged in. Logging in again will replace your session.
+  ```
+
+  **What it means**
+  
+  You have an existing session in `~/.suron/auth.json`. Re-logging in will overwrite it.
+
+  **Actions**
+  - Continue if intentional (switching accounts/workers)
+  - Cancel with `Ctrl+C` to keep current session
+  - View current session: `cat ~/.suron/auth.json`
+</Accordion>
+
+<Accordion title="Authentication failed in CI/CD">
+  **Symptom**
+  ```bash
+  Error: Could not connect to Suron: fetch failed
+  ```
+
+  **Solutions**
+  
+  1. Verify secrets are set in CI platform:
+     - `VAULT_WORKER_URL`
+     - `VAULT_CLI_TOKEN`
+  
+  2. Check auth file creation:
+     ```bash
+     mkdir -p ~/.suron
+     echo '{"workerUrl":"'"$VAULT_WORKER_URL"'","token":"'"$VAULT_CLI_TOKEN"'"}' > ~/.suron/auth.json
+     cat ~/.suron/auth.json  # Verify format
+     ```
+  
+  3. Ensure token hasn't expired
+  
+  4. Test connectivity:
+     ```bash
+     curl -v $VAULT_WORKER_URL/health
+     ```
+</Accordion>
+
+## Connection & Network Issues
+
+<Accordion title="Could not connect to Suron">
+  **Symptom**
+  ```bash
+  Error: Could not connect to Suron: fetch failed
+  ```
+
+  **Causes & Solutions**
+  
+  - **Network firewall**: Ensure outbound HTTPS to Cloudflare Workers is allowed
+  - **Wrong URL**: Verify `VAULT_WORKER_URL` includes `https://` and correct domain
+  - **Worker offline**: Check Cloudflare dashboard for worker status
+  - **DNS issues**: Try `ping` or `curl` to verify domain resolution
+  
+  **Debug**
+  ```bash
+  # Test direct connectivity
+  curl -v https://suronai-vault.your-account.workers.dev/health
+  
+  # Check environment variable
+  echo $VAULT_WORKER_URL
+  ```
+</Accordion>
+
+<Accordion title="Timeout during vault.load()">
+  **Symptom**
+  ```javascript
+  Error: Request timeout after 5 minutes
+  ```
+
+  **Causes**
+  
+  1. **No Telegram approval**: Admin didn't tap Approve within 5 minutes
+  2. **Telegram bot offline**: Bot not responding to requests
+  3. **Network latency**: Slow connection between app and worker
+  
+  **Solutions**
+  
+  - Ensure admin is ready to approve before deployment
+  - Verify Telegram bot token is configured in worker
+  - For automated deployments, use [permit persistence](/guides/migration#permit-persistence)
+  - Check worker logs in Cloudflare dashboard
+  
+  **Extend timeout** (not recommended):
+  ```javascript
+  // Custom polling with longer timeout - use with caution
+  process.env.VAULT_APPROVAL_TIMEOUT = '600000' // 10 minutes
+  await vault.load()
+  ```
+</Accordion>
+
+<Accordion title="Connection refused on localhost">
+  **Symptom**
+  ```bash
+  Error: connect ECONNREFUSED 127.0.0.1:3000
+  ```
+
+  **This is not a Suron issue**
+  
+  Your application server isn't listening yet. Ensure:
+  
+  1. `vault.load()` is called **before** `app.listen()`:
+     ```javascript
+     await vault.load()  // ← secrets loaded first
+     app.listen(3000)     // ← then start server
+     ```
+  
+  2. No errors during secret loading
+  
+  3. Database connections succeed before starting HTTP server
+</Accordion>
+
+## Approval & Permit Issues
+
+<Accordion title="Approval request never received on Telegram">
+  **Symptom**
+  
+  App hangs at "Waiting for approval", but no Telegram message arrives.
+
+  **Causes & Solutions**
+  
+  1. **Telegram bot not configured**: Verify `TELEGRAM_BOT_TOKEN` in worker environment
+  2. **Chat ID missing**: Ensure `TELEGRAM_CHAT_ID` is set correctly
+  3. **Bot blocked**: Unblock the bot in Telegram if previously blocked
+  4. **Worker error**: Check Cloudflare Worker logs for errors
+  
+  **Test bot manually**:
+  ```bash
+  curl -X POST "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/sendMessage" \
+    -d "chat_id=<YOUR_CHAT_ID>" \
+    -d "text=Test message"
+  ```
+</Accordion>
+
+<Accordion title="Permit expired - requesting fresh approval">
+  **Symptom**
+  ```bash
+  Permit expired — requesting fresh approval
+  ```
+
+  **What it means**
+  
+  The 24-hour permit token has expired. A new Telegram approval is required.
+
+  **Solutions**
+  
+  - **For development**: Approve the new request
+  - **For production**: Implement [permit persistence](/guides/migration#permit-persistence):
+    ```javascript
+    import { vault } from '@suronai/sdk'
+    import { readFileSync, writeFileSync } from 'fs'
+    
+    // Load stored permit
+    const permitFile = '.vault-permit'
+    if (existsSync(permitFile)) {
+      process.env.VAULT_PERMIT = readFileSync(permitFile, 'utf8').trim()
+    }
+    
+    await vault.load()
+    
+    // Save new permit
+    writeFileSync(permitFile, vault.getPermitToken())
+    ```
+  
+  **Note**: Add `.vault-permit` to `.gitignore`
+</Accordion>
+
+<Accordion title="Permit rejected or invalid">
+  **Symptom**
+  ```bash
+  Permit invalid — requesting fresh approval
+  ```
+
+  **Causes**
+  
+  - Permit was revoked by admin
+  - Permit file corrupted
+  - App ID changed
+  - Master key rotated
+  
+  **Solution**
+  
+  Approve the new request. If using permit persistence, the new permit will be saved automatically.
+</Accordion>
+
+## Decryption & Secret Loading
+
+<Accordion title="Failed to decrypt secret">
+  **Symptom**
+  ```bash
+  Error: Failed to decrypt: API_KEY
+  ```
+
+  **Causes & Solutions**
+  
+  1. **Key rotated**: Master key changed, old encrypted values invalid
+     - Re-encrypt: `suron encrypt --yes`
+     - Redeploy application
+  
+  2. **Corrupted vault file**: `.env.suron` manually edited incorrectly
+     - Restore from git
+     - Or re-encrypt from `.env`
+  
+  3. **Wrong encryption format**: Secret not in `suron:v1:...` format
+     - Check `.env.suron` for malformed lines
+     - Re-run `suron encrypt`
+</Accordion>
+
+<Accordion title="No vault found for app">
+  **Symptom**
+  ```bash
+  Error: No vault found for "my-app" — run: suron encrypt
+  ```
+
+  **Causes & Solutions**
+  
+  1. **Never encrypted**: Run `suron encrypt` to create and upload vault
+  2. **Wrong app name**: Verify `VAULT_APP_ID` matches `suron init --app` name
+  3. **Vault not uploaded**: Re-run `suron encrypt` (auto-uploads)
+  4. **Worker database issue**: Check Convex dashboard for data
+  
+  **Verify app exists**:
+  ```bash
+  suron list --app my-app
+  ```
+</Accordion>
+
+<Accordion title="Missing required env var: VAULT_WORKER_URL">
+  **Symptom**
+  ```bash
+  Error: Missing required env var: VAULT_WORKER_URL
+  ```
+
+  **Solution**
+  
+  Set the required environment variables on your server:
+  
+  ```bash
+  export VAULT_WORKER_URL=https://suronai-vault.your-account.workers.dev
+  export VAULT_ACCESS_TOKEN=your_server_token
+  export VAULT_APP_ID=my-app
+  ```
+  
+  Or in `.env` (not `.env.suron`):
+  ```env
+  VAULT_WORKER_URL=https://...
+  VAULT_ACCESS_TOKEN=srv_...
+  VAULT_APP_ID=my-app
+  ```
+  
+  <Warning>
+    These three variables must be set **outside** the vault since they're needed to connect to the vault.
+  </Warning>
+</Accordion>
+
+## Hot-Reload Issues
+
+<Accordion title="Secrets not updating after suron encrypt">
+  **Symptom**
+  
+  Running `suron encrypt` but `process.env` values don't change in the running app.
+
+  **Causes & Solutions**
+  
+  1. **Not reading process.env at request time**:
+     ```javascript
+     // ❌ BAD - captured at startup
+     const API_KEY = process.env.API_KEY
+     
+     // ✅ GOOD - reads at request time
+     app.get('/api', (req, res) => {
+       const key = process.env.API_KEY  // ← always current
+     })
+     ```
+  
+  2. **Heartbeat not running**: Check logs for heartbeat errors
+  
+  3. **Vault version unchanged**: Verify upload succeeded:
+     ```bash
+     suron encrypt --yes
+     # Should show: "X secrets encrypted and pushed"
+     ```
+  
+  4. **App not listening to events**:
+     ```javascript
+     import { vault } from '@suronai/sdk'
+     
+     vault.events.on('revoked', () => {
+       console.log('Access revoked!')
+     })
+     ```
+</Accordion>
+
+<Accordion title="Hot-reload failed error">
+  **Symptom**
+  ```bash
+  Error: Hot-reload failed: fetch failed
+  ```
+
+  **Causes**
+  
+  - Network connectivity lost
+  - Worker temporarily unavailable
+  - Token expired or revoked
+  
+  **What happens**
+  
+  The app continues running with the **last loaded secrets**. Heartbeat will retry on the next cycle (30 seconds).
+  
+  **Solution**
+  
+  Usually transient. If persistent:
+  - Check network connectivity
+  - Verify `VAULT_ACCESS_TOKEN` is valid
+  - Review worker logs for errors
+  - Restart app if needed
+</Accordion>
+
+<Accordion title="Heartbeat stopped after hot-reload">
+  **Symptom**
+  
+  After hot-reload, no more heartbeat pings or subsequent reloads.
+
+  **This is normal behavior**
+  
+  The heartbeat is restarted after each hot-reload. Check:
+  
+  1. App logs show "Secrets hot-reloaded" success message
+  2. No errors in console after reload
+  3. App still responding to requests
+  
+  **If truly stuck**:
+  
+  Restart the application. The SDK will resume heartbeat automatically after `vault.load()`.
+</Accordion>
+
+## Command-Line Issues
+
+<Accordion title="Command not found: suron">
+  **Symptom**
+  ```bash
+  bash: suron: command not found
+  ```
+
+  **Solution**
+  ```bash
+  npm install -g @suronai/cli
+  
+  # Or use npx
+  npx @suronai/cli login
+  ```
+  
+  **PATH issues**: Ensure npm global bin is in PATH:
+  ```bash
+  echo $PATH | grep npm
+  npm config get prefix
+  ```
+</Accordion>
+
+<Accordion title="--app name is required in non-interactive mode">
+  **Symptom**
+  ```bash
+  Error: --app name is required in non-interactive mode
+  ```
+
+  **When it happens**
+  
+  Using `--yes` flag without specifying app name.
+
+  **Solution**
+  ```bash
+  # Always provide --app with --yes
+  suron init --app my-app --yes
+  suron encrypt --app my-app --yes
+  suron rotate --app my-app --yes
+  ```
+  
+  Or add to `.env.suron`:
+  ```env
+  VAULT_APP=my-app
+  ```
+</Accordion>
+
+<Accordion title="File not found: .env">
+  **Symptom**
+  ```bash
+  Error: File not found: .env
+  ```
+
+  **Causes**
+  
+  - No `.env` file exists in current directory
+  - Running command from wrong directory
+  
+  **Solutions**
+  
+  1. Create `.env` first:
+     ```env
+     DATABASE_URL=postgresql://...
+     API_KEY=secret123
+     ```
+  
+  2. Or specify custom file:
+     ```bash
+     suron encrypt --file .env.production
+     ```
+  
+  3. Or navigate to project root:
+     ```bash
+     cd /path/to/project
+     suron encrypt
+     ```
+</Accordion>
+
+## Database Connection Issues
+
+<Accordion title="Database connection failed after vault.load()">
+  **Symptom**
+  ```bash
+  Database connection failed: invalid connection string
+  ```
+
+  **Causes**
+  
+  - `DATABASE_URL` not in vault
+  - Decryption failed silently
+  - Connection string malformed
+  
+  **Debug**
+  ```javascript
+  await vault.load()
+  
+  // Verify secret loaded
+  console.log('DATABASE_URL set:', !!process.env.DATABASE_URL)
+  console.log('Starts with postgres:', process.env.DATABASE_URL?.startsWith('postgres'))
+  
+  // Don't log the full URL - it's sensitive!
+  ```
+  
+  **Verify encryption**:
+  ```bash
+  # Check .env.suron contains DATABASE_URL
+  grep DATABASE_URL .env.suron
+  
+  # Should show encrypted format:
+  # DATABASE_URL=suron:v1:...
+  ```
+</Accordion>
+
+## Getting Help
+
+If your issue isn't covered here:
+
+1. **Check worker logs**: Cloudflare dashboard → Workers & Pages → your-worker → Logs
+2. **Enable debug logging**:
+   ```bash
+   export DEBUG=suron:*
+   node index.js
+   ```
+3. **Test with example**:
+   ```bash
+   git clone https://github.com/Cryptoistaken/Suron
+   cd Suron/source/examples/01-basic
+   npm install
+   # Follow README
+   ```
+4. **Review source code**: Check [SDK source](https://github.com/Cryptoistaken/Suron/tree/main/source/SDK) for implementation details
+5. **Open an issue**: [GitHub Issues](https://github.com/Cryptoistaken/Suron/issues)
+
+<Tip>
+  Include error messages, environment (Node version, platform), and steps to reproduce when reporting issues.
+</Tip>

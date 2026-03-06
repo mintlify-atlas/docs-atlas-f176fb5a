@@ -1,0 +1,294 @@
+---
+title: suron decrypt
+description: Decrypt and display a secret value from your Suron Vault
+---
+
+The `decrypt` command retrieves and decrypts a specific secret, printing its plaintext value to stdout. This is useful for debugging, scripting, or verifying secret values.
+
+## Usage
+
+```bash
+suron decrypt KEY [--app name]
+```
+
+## Parameters
+
+<ParamField path="KEY" type="string" required>
+  The secret key name to decrypt (e.g., `DATABASE_URL`). Positional argument.
+</ParamField>
+
+<ParamField path="--app" type="string">
+  App name. If not provided, reads from `.env.suron` file.
+</ParamField>
+
+## Examples
+
+### Decrypt a Secret
+
+```bash
+suron decrypt DATABASE_URL
+```
+
+Output:
+
+```bash
+postgres://user:password@localhost:5432/mydb
+```
+
+### Decrypt with App Name
+
+```bash
+suron decrypt API_KEY --app production
+```
+
+Output:
+
+```bash
+sk_live_abc123xyz789
+```
+
+### Use in Scripts
+
+```bash
+export DATABASE_URL=$(suron decrypt DATABASE_URL)
+echo "Connecting to: $DATABASE_URL"
+```
+
+### Verify a Secret Value
+
+```bash
+suron decrypt SESSION_SECRET
+```
+
+Output:
+
+```bash
+my-super-secret-session-key
+```
+
+## How It Works
+
+1. **Parses KEY** from command argument
+2. **Resolves app name** from `--app` flag or `.env.suron`
+3. **Fetches master key** from Worker (reconstructed from Convex + Cloudflare KV)
+4. **Reads `.env.suron`** and finds the matching key
+5. **Decrypts the value** using AES-256-GCM
+6. **Prints plaintext** to stdout
+
+## Output Format
+
+The command outputs only the decrypted value with no additional formatting:
+
+```bash
+the-decrypted-value
+```
+
+This makes it suitable for piping or variable assignment.
+
+### Clean Output
+
+No decorative elements are added:
+
+```bash
+# Just the value
+suron decrypt API_KEY
+sk_live_abc123
+
+# NOT like this:
+# ✓ Decrypted API_KEY: sk_live_abc123
+```
+
+## Plaintext Handling
+
+If the secret is stored in plaintext (not encrypted):
+
+```bash
+suron decrypt DEBUG
+```
+
+Output:
+
+```bash
+true
+```
+
+The value is returned as-is without decryption.
+
+## Error Cases
+
+### Missing Key Argument
+
+```bash
+suron decrypt
+```
+
+Output:
+
+```bash
+✗ Usage: suron decrypt KEY
+```
+
+### Secret Not Found
+
+```bash
+suron decrypt NONEXISTENT_KEY
+```
+
+Output:
+
+```bash
+✗ Secret not found: NONEXISTENT_KEY
+```
+
+Verify the key exists:
+
+```bash
+suron list
+```
+
+### Missing App Name
+
+```bash
+suron decrypt API_KEY
+```
+
+Output (if no `.env.suron` exists):
+
+```bash
+✗ App name not found — check VAULT_APP in .env.suron
+```
+
+Solution: [Initialize first](/cli/commands/init) or provide `--app`:
+
+```bash
+suron decrypt API_KEY --app myapp
+```
+
+### Not Logged In
+
+```bash
+✗ Not logged in — run: suron login
+```
+
+Solution: [Authenticate first](/cli/authentication#login)
+
+## Use Cases
+
+### Shell Scripts
+
+Export decrypted values as environment variables:
+
+```bash
+#!/bin/bash
+export DATABASE_URL=$(suron decrypt DATABASE_URL)
+export API_KEY=$(suron decrypt API_KEY)
+
+node server.js
+```
+
+### Verification
+
+Verify a secret was set correctly:
+
+```bash
+suron add PASSWORD "my-new-password"
+suron decrypt PASSWORD
+# Output: my-new-password
+```
+
+### Debugging
+
+Check secret values during troubleshooting:
+
+```bash
+# Application can't connect to database
+suron decrypt DATABASE_URL
+# Check if the URL is correct
+```
+
+### Conditional Logic
+
+```bash
+DEBUG_MODE=$(suron decrypt DEBUG)
+
+if [ "$DEBUG_MODE" = "true" ]; then
+  echo "Running in debug mode"
+  npm run dev
+else
+  npm run start
+fi
+```
+
+### Copy to Clipboard
+
+```bash
+# macOS
+suron decrypt API_KEY | pbcopy
+
+# Linux (with xclip)
+suron decrypt API_KEY | xclip -selection clipboard
+
+# Windows (with clip)
+suron decrypt API_KEY | clip
+```
+
+## Security Considerations
+
+<Warning>
+  Decrypted values are printed to stdout, which may be logged by your shell history or visible to other processes. Use with caution in shared environments.
+</Warning>
+
+### Shell History
+
+Decrypted values don't appear in shell history (only the command does):
+
+```bash
+# Safe - value not in history
+suron decrypt API_KEY
+
+# Less safe - value appears in history
+echo "sk_live_abc123"
+```
+
+### Avoid Logging
+
+Don't redirect to files that might be committed:
+
+```bash
+# BAD - might accidentally commit
+suron decrypt API_KEY > secrets.txt
+
+# Better - use in memory
+API_KEY=$(suron decrypt API_KEY)
+```
+
+### Terminal Scrollback
+
+Decrypted values remain visible in terminal scrollback. Clear your terminal when finished:
+
+```bash
+suron decrypt SENSITIVE_KEY
+# Review the value
+clear  # Clear terminal scrollback
+```
+
+## Alternative: Use `suron run`
+
+For running scripts with secrets, prefer [`suron run`](/cli/commands/run) which decrypts and injects all secrets automatically:
+
+```bash
+# Instead of:
+export DATABASE_URL=$(suron decrypt DATABASE_URL)
+export API_KEY=$(suron decrypt API_KEY)
+node server.js
+
+# Use:
+suron run server.js
+```
+
+## Related Commands
+
+- [suron list](/cli/commands/list) - List all secret keys
+- [suron add](/cli/commands/add) - Add or update a secret
+- [suron run](/cli/commands/run) - Run scripts with all secrets injected
+- [suron encrypt](/cli/commands/encrypt) - Encrypt secrets from .env file

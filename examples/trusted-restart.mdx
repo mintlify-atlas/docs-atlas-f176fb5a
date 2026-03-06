@@ -1,0 +1,215 @@
+---
+title: Trusted Restart
+description: Skip Telegram approval on restarts by persisting the permit token
+---
+
+After the first Telegram approval, a **permit token** is issued (valid 24h). This example persists that token to a local file so that process restarts (crashes, deploys, PM2 respawns) skip Telegram automatically.
+
+## How It Works
+
+```
+First start:     vault.load() → Telegram approval → permit token saved to .vault-permit
+Second start:    vault.load() → reads .vault-permit → /resume → skip Telegram → load secrets
+After 24h:       vault.load() → permit expired → Telegram approval → new permit saved
+After rotate:    vault.load() → permit revoked → Telegram approval → new permit saved
+```
+
+## Complete Example
+
+<CodeGroup>
+
+```javascript index.js
+import { vault }                    from '@suronai/sdk'
+import { writeFileSync, readFileSync,
+         existsSync }               from 'fs'
+import express                      from 'express'
+
+// --- Permit persistence helpers ---
+// The permit token lets the app restart without Telegram approval for 24h.
+// We store it in a local file so it survives process restarts.
+// NEVER commit this file to git — add .vault-permit to .gitignore.
+
+const PERMIT_FILE = '.vault-permit'
+
+function loadStoredPermit() {
+  if (existsSync(PERMIT_FILE)) {
+    try { return readFileSync(PERMIT_FILE, 'utf8').trim() } catch { /* ignore */ }
+  }
+  // Also accept permit from environment variable (e.g. set by a deploy platform)
+  return process.env.VAULT_PERMIT ?? null
+}
+
+function savePermit(token) {
+  if (!token) return
+  writeFileSync(PERMIT_FILE, token)
+  // Also set in process.env so child processes could inherit it
+  process.env.VAULT_PERMIT = token
+}
+
+// --- Startup ---
+
+// Inject stored permit into process.env before vault.load() so the SDK can find it.
+// vault.load() checks process.env.VAULT_PERMIT if no in-memory permit exists yet.
+const storedPermit = loadStoredPermit()
+if (storedPermit) {
+  process.env.VAULT_PERMIT = storedPermit
+  console.log('Permit found — attempting trusted restart (no Telegram approval needed)')
+} else {
+  console.log('No permit — will request Telegram approval')
+}
+
+// vault.load() handles everything:
+// - If permit is valid → skips Telegram, resumes silently
+// - If permit expired/revoked → falls back to full Telegram approval automatically
+await vault.load()
+
+// Save the permit token for the next restart
+savePermit(vault.getPermitToken())
+
+// --- App ---
+
+const app  = express()
+const port = process.env.PORT || 3000
+
+app.use(express.json())
+
+app.get('/health', (req, res) => {
+  res.json({
+    status:  'ok',
+    secrets: 'loaded',
+    permit:  existsSync(PERMIT_FILE) ? 'stored' : 'none',
+  })
+})
+
+app.listen(port, () => {
+  console.log(`Server listening on port ${port}`)
+})
+```
+
+```json package.json
+{
+  "name": "suron-example-trusted-restart",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@suronai/sdk": "^1.0.1",
+    "express": "^4.18.2"
+  }
+}
+```
+
+```env .env.example
+VAULT_WORKER_URL=https://suronai-vault.your-account.workers.dev
+VAULT_ACCESS_TOKEN=your_server_access_token
+VAULT_APP_ID=my-app
+# Populated automatically after first approval — do not set manually
+# VAULT_PERMIT=
+```
+
+```gitignore .gitignore
+.vault-permit
+```
+
+</CodeGroup>
+
+## Setup Instructions
+
+```bash
+cp .env.example .env
+npm install
+npm start
+# First run: approve on Telegram
+# Subsequent runs within 24h: automatic, no Telegram needed
+```
+
+## The Pattern
+
+```javascript
+import { vault }        from '@suronai/sdk'
+import { writeFileSync, readFileSync, existsSync } from 'fs'
+
+const PERMIT_FILE = '.vault-permit'
+
+// Load stored permit before vault.load()
+const permit = existsSync(PERMIT_FILE)
+  ? readFileSync(PERMIT_FILE, 'utf8').trim()
+  : null
+
+if (permit) process.env.VAULT_PERMIT = permit
+
+await vault.load()   // uses permit if valid, falls back to Telegram if not
+
+// Save permit for next restart
+writeFileSync(PERMIT_FILE, vault.getPermitToken() ?? '')
+```
+
+<Warning>
+  **Critical:** Add `.vault-permit` to your `.gitignore` — it's a secret token that grants access to your vault for 24 hours.
+</Warning>
+
+## Permit Lifecycle
+
+### First Start
+1. No `.vault-permit` file exists
+2. `vault.load()` sends Telegram notification
+3. You tap **Approve**
+4. Secrets are loaded and permit token is saved to `.vault-permit`
+
+### Subsequent Restarts (within 24h)
+1. `.vault-permit` file exists
+2. `vault.load()` uses the stored permit
+3. Secrets are loaded immediately, no Telegram notification
+4. Updated permit is saved back to `.vault-permit`
+
+### After 24 Hours
+1. Stored permit has expired
+2. `vault.load()` automatically falls back to Telegram approval
+3. New permit is saved to `.vault-permit`
+
+### After Secret Rotation
+1. Admin runs `suron rotate`
+2. All permits are revoked
+3. Next restart: `vault.load()` requests Telegram approval
+4. New permit is saved to `.vault-permit`
+
+## Environment Variable Alternative
+
+Instead of a file, you can also set the permit as an environment variable:
+
+```bash
+export VAULT_PERMIT=your-permit-token
+```
+
+The example checks both:
+```javascript
+function loadStoredPermit() {
+  if (existsSync(PERMIT_FILE)) {
+    return readFileSync(PERMIT_FILE, 'utf8').trim()
+  }
+  return process.env.VAULT_PERMIT ?? null
+}
+```
+
+<Tip>
+  Use the file approach for local development and single-server deployments. Use the environment variable approach for platforms like Heroku, Railway, or Fly.io where you can set environment variables via their dashboard.
+</Tip>
+
+## When Permits Are Revoked
+
+- After `suron rotate` (manual secret rotation)
+- After admin taps **Stop** in Telegram
+- Automatically after 24 hours
+
+## Dependencies
+
+- `@suronai/sdk` ^1.0.1
+- `express` ^4.18.2
+
+## GitHub Source
+
+View the complete source code:
+
+[github.com/Cryptoistaken/Suron/tree/main/examples/06-trusted-restart](https://github.com/Cryptoistaken/Suron/tree/main/examples/06-trusted-restart)

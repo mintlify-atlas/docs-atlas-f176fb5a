@@ -1,0 +1,273 @@
+---
+title: suron rotate
+description: Rotate the master encryption key and re-encrypt all secrets
+---
+
+The `rotate` command generates a new master key, re-encrypts all secrets with the new key, updates remote storage, and pushes the re-encrypted vault. This is critical for security compliance and incident response.
+
+## Usage
+
+```bash
+suron rotate [--app name]
+```
+
+## Parameters
+
+<ParamField path="--app" type="string">
+  App name. If not provided, reads from `.env.suron` file.
+</ParamField>
+
+## Examples
+
+### Rotate Master Key
+
+```bash
+suron rotate
+```
+
+Output:
+
+```bash
+⋯ Fetching current key
+⋯ Generating new master key
+⋯ Pushing to Suron...
+✓ Master key rotated
+✓ Vault re-encrypted and pushed
+⚠ Redeploy your app — the old key is now invalid
+```
+
+### Rotate with App Name
+
+```bash
+suron rotate --app production
+```
+
+## How It Works
+
+1. **Fetches current master key** from Worker (via `POST /admin/keys`)
+2. **Reads `.env.suron`** and parses all secrets
+3. **Generates new master key** using cryptographically secure random bytes
+4. **Splits new key** into two halves (Convex + Cloudflare KV)
+5. **Decrypts all secrets** with the old key
+6. **Re-encrypts all secrets** with the new key
+7. **Updates remote key storage** via `POST /admin/rotate`
+8. **Writes re-encrypted vault** to `.env.suron`
+9. **Automatically pushes** updated vault via `POST /admin/upload`
+
+## What Gets Rotated
+
+### Master Key
+
+A new 64-byte master key is generated and split:
+
+- **Old key**: Retrieved from Convex + Cloudflare KV
+- **New key**: Generated locally, split, and stored remotely
+
+The old key is immediately invalidated after rotation.
+
+### All Secrets
+
+Every secret in `.env.suron` is re-encrypted:
+
+**Before rotation:**
+```bash
+API_KEY=enc:sv1:b2xkX2VuY3J5cHRpb24...
+DATABASE_URL=enc:sv1:b2xkX2RhdGFiYXNl...
+```
+
+**After rotation:**
+```bash
+API_KEY=enc:sv1:bmV3X2VuY3J5cHRpb24...
+DATABASE_URL=enc:sv1:bmV3X2RhdGFiYXNl...
+```
+
+The plaintext values remain the same, but the ciphertext changes.
+
+## Critical: Redeploy Required
+
+<Warning>
+  After rotation, you MUST redeploy your application. The old master key is invalidated, so any running instances using the old key will fail to decrypt secrets.
+</Warning>
+
+### Deployment Workflow
+
+```bash
+# 1. Rotate the key
+suron rotate
+
+# 2. Commit the updated vault
+git add .env.suron
+git commit -m "Rotate master encryption key"
+git push
+
+# 3. Redeploy your application
+# The deployment will fetch the new master key
+```
+
+### Zero-Downtime Rotation
+
+For zero-downtime rotation in production:
+
+1. **Use blue-green deployment** or rolling updates
+2. **Rotate during low-traffic period**
+3. **Monitor deployment** to ensure new instances start successfully
+4. **Keep old instances running** until new ones are healthy
+
+## When to Rotate
+
+### Security Events
+
+- **Key compromise suspected** - Rotate immediately
+- **Employee departure** - Rotate if they had key access
+- **Security audit finding** - Rotate as remediation
+- **Breach in related systems** - Rotate as precaution
+
+### Compliance
+
+- **Policy requirement** - Many policies require periodic rotation (e.g., every 90 days)
+- **Audit preparation** - Rotate before audits to demonstrate capability
+- **Certification maintenance** - Required for some certifications
+
+### Operational
+
+- **After testing in production** - If keys were exposed during debugging
+- **Environment migration** - When moving between environments
+- **Before major release** - As a security best practice
+
+## Error Cases
+
+### Missing App Name
+
+```bash
+suron rotate
+```
+
+Output (if no `.env.suron` exists):
+
+```bash
+✗ App name not found — pass --app or check .env.suron
+```
+
+Solution: Provide `--app`:
+
+```bash
+suron rotate --app myapp
+```
+
+### Not Logged In
+
+```bash
+✗ Not logged in — run: suron login
+```
+
+Solution: [Authenticate first](/cli/authentication#login)
+
+### Network Errors
+
+```bash
+✗ Could not fetch current key from Worker
+```
+
+Verify:
+- Worker is accessible
+- Authentication is valid
+- Network connection is stable
+
+## Vault File Changes
+
+The `.env.suron` file is updated in place with re-encrypted values:
+
+**Before:**
+```bash
+# Encrypted with @suronai/cli
+VAULT_APP=myapp
+DATABASE_URL=enc:sv1:YWJjZGVmZ2hpamts...
+API_KEY=enc:sv1:bW5vcHFyc3R1dnd4...
+```
+
+**After:**
+```bash
+# Encrypted with @suronai/cli
+VAULT_APP=myapp
+DATABASE_URL=enc:sv1:eHl6MTIzNDU2Nzg5...
+API_KEY=enc:sv1:OTg3NjU0MzIxYWJj...
+```
+
+Notice:
+- Header and metadata unchanged
+- Key names unchanged
+- Encrypted values are different (new ciphertext)
+
+## Plaintext Secret Handling
+
+If a secret is stored in plaintext:
+
+```bash
+DEBUG=true
+```
+
+It remains plaintext after rotation (not encrypted). Only encrypted secrets are re-encrypted.
+
+## Automatic Push
+
+After re-encryption, the vault is automatically pushed:
+
+```bash
+⋯ Pushing to Suron...
+✓ Vault re-encrypted and pushed
+```
+
+No separate `suron upload` is needed.
+
+## Best Practices
+
+1. **Test in staging first** - Verify rotation process before production
+2. **Coordinate with team** - Notify team members before rotating
+3. **Monitor deployments** - Watch for decryption failures after rotation
+4. **Document rotation** - Record why and when you rotated
+5. **Automate where possible** - Script rotation for compliance schedules
+
+## Rotation vs Secret Updates
+
+**Key rotation** changes the encryption key:
+- All secrets re-encrypted
+- Old key invalidated
+- Requires redeployment
+- Done for security/compliance
+
+**Secret updates** ([`suron add`](/cli/commands/add)) change secret values:
+- Individual secret updated
+- Encryption key unchanged
+- May require redeployment (depends on app)
+- Done for operational changes
+
+## Workflow Example
+
+```bash
+# 1. List current secrets
+suron list
+
+# 2. Rotate the master key
+suron rotate
+
+# 3. Verify secrets still accessible
+suron decrypt DATABASE_URL
+
+# 4. Commit updated vault
+git add .env.suron
+git commit -m "Security: rotate master encryption key"
+git push
+
+# 5. Deploy application
+# (Deployment fetches new key from Worker)
+
+# 6. Verify application health
+# Check logs for successful secret decryption
+```
+
+## Related Commands
+
+- [suron init](/cli/commands/init) - Generate initial master key
+- [suron encrypt](/cli/commands/encrypt) - Encrypt secrets (doesn't rotate key)
+- [suron add](/cli/commands/add) - Update individual secrets
+- [suron list](/cli/commands/list) - Verify secrets after rotation

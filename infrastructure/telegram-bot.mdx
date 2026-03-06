@@ -1,0 +1,494 @@
+---
+title: Telegram Bot Setup
+description: Create and configure your Telegram bot for Suron Vault approval notifications
+---
+
+The Telegram bot sends approval notifications when apps request access to secrets. It provides interactive buttons for approving, denying, or stopping apps.
+
+## Create Bot with BotFather
+
+<Steps>
+  <Step title="Open BotFather">
+    Message [@BotFather](https://t.me/botfather) on Telegram
+  </Step>
+  
+  <Step title="Create new bot">
+    Send `/newbot` command
+    
+    BotFather will ask:
+    1. **Bot name** (display name): `Suron Vault`
+    2. **Username** (must end in `bot`): `YourProjectVault_bot`
+  </Step>
+  
+  <Step title="Save bot token">
+    BotFather replies with:
+    ```
+    Done! Congratulations on your new bot.
+    
+    Use this token to access the HTTP API:
+    123456789:ABCdefGHIjklMNOpqrsTUVwxyz
+    ```
+    
+    This is your `BOT_TOKEN` - save it securely!
+  </Step>
+</Steps>
+
+<Warning>
+  Never commit your bot token to git. It will be stored as a Cloudflare Worker secret.
+</Warning>
+
+## Get Your Chat ID
+
+The bot needs to know which Telegram user is the admin.
+
+<Steps>
+  <Step title="Message your bot">
+    Open the bot you just created and send any message (e.g., `/start`)
+  </Step>
+  
+  <Step title="Fetch updates">
+    Run this command (replace `<BOT_TOKEN>` with your actual token):
+    
+    ```bash
+    curl https://api.telegram.org/bot<BOT_TOKEN>/getUpdates
+    ```
+  </Step>
+  
+  <Step title="Extract chat_id">
+    Response looks like:
+    ```json
+    {
+      "ok": true,
+      "result": [
+        {
+          "update_id": 123456789,
+          "message": {
+            "message_id": 1,
+            "from": {
+              "id": 987654321,
+              "first_name": "Your Name"
+            },
+            "chat": {
+              "id": 987654321,  // ← This is your ADMIN_CHAT_ID
+              "type": "private"
+            },
+            "date": 1704067200,
+            "text": "/start"
+          }
+        }
+      ]
+    }
+    ```
+    
+    Find `"chat":{"id":987654321,...}` - that number is your `ADMIN_CHAT_ID`
+  </Step>
+</Steps>
+
+## Configure in Worker
+
+Add bot credentials to your Cloudflare Worker:
+
+<Steps>
+  <Step title="Set BOT_TOKEN secret">
+    ```bash
+    wrangler secret put BOT_TOKEN
+    # Paste your token from BotFather
+    ```
+  </Step>
+  
+  <Step title="Set ADMIN_CHAT_ID in wrangler.toml">
+    Edit `worker/wrangler.toml`:
+    
+    ```toml
+    [vars]
+    ADMIN_CHAT_ID = "987654321"
+    ```
+    
+    This is a public variable (not sensitive), so it goes in the config file.
+  </Step>
+  
+  <Step title="Redeploy Worker">
+    ```bash
+    wrangler deploy
+    ```
+  </Step>
+</Steps>
+
+## Setup Webhook
+
+Telegram needs to know where to send bot messages:
+
+```bash
+export BOT_TOKEN="your_bot_token"
+export VAULT_WORKER_URL="https://suronai-vault.your-account.workers.dev"
+
+cd worker
+npm run webhook
+```
+
+Expected output:
+```
+Webhook set: https://suronai-vault.your-account.workers.dev/webhook
+```
+
+<Info>
+  The webhook script calls `setWebhook` on the Telegram API to configure your Worker's `/webhook` endpoint as the destination for all bot updates.
+</Info>
+
+## Test Bot
+
+Send `/start` to your bot. You should receive:
+
+```
+Suron Vault
+
+AES-256-GCM encrypted secrets with Telegram approval.
+
+/apps — all apps
+/app [id] — app detail + actions
+/logs [id] — activity log
+/stop [id] — revoke access immediately
+
+[Button: View All Apps]
+```
+
+## Bot Commands
+
+The bot supports these text commands:
+
+### /start
+
+Shows welcome message and available commands.
+
+```
+/start
+```
+
+### /apps
+
+Lists all registered apps with status and last active time.
+
+```
+/apps
+```
+
+Example response:
+```
+Suron — Apps (3)
+
+● Active  my-api
+   Last active: 2m ago
+
+○ Idle  background-worker
+   Last active: never
+
+◐ Pending  web-app
+   Last active: 1h ago
+
+[Button: my-api] [Button: background-worker] [Button: web-app]
+```
+
+### /app [appId]
+
+Shows detailed info for a specific app.
+
+```
+/app my-api
+```
+
+Example response:
+```
+my-api
+
+Status:       ● Active
+Host:         prod-server-01
+Last active:  2m ago
+Heartbeat:    just now
+Registered:   Mon, 01 Jan 2024 12:00:00 GMT
+
+[Button: ⏹ Stop App] [Button: Logs] [Button: ← All Apps]
+```
+
+### /logs [appId]
+
+Shows recent activity logs for an app (last 10 actions).
+
+```
+/logs my-api
+```
+
+Example response:
+```
+Suron — Logs: my-api
+
+Mon, 01 Jan 2024 12:05:00 GMT
+Secrets loaded into memory
+
+Mon, 01 Jan 2024 12:04:45 GMT
+Approved
+
+Mon, 01 Jan 2024 12:04:30 GMT
+Access requested
+
+[Button: ← Back]
+```
+
+### /stop [appId]
+
+Immediately revokes access for a running app.
+
+```
+/stop my-api
+```
+
+Response:
+```
+⏹ Stopped my-api — shuts down on next heartbeat.
+```
+
+The app's status is set to `denied`, causing it to exit on the next heartbeat (within 30 seconds).
+
+## Approval Workflow
+
+When an app calls `vault.load()`, the admin receives a notification:
+
+### Initial Request
+
+```
+Suron — Vault Access Request
+
+App: my-api
+Host: prod-server-01
+Last active: 5m ago
+
+[Button: ✅ Approve] [Button: ❌ Deny]
+```
+
+### After Approve
+
+Tapping **✅ Approve** generates a permit token and updates the message:
+
+```
+✅ Approved — my-api
+
+Secrets are being decrypted into memory.
+
+[Button: View App] [Button: ⏹ Stop Later]
+```
+
+The SDK receives the approval, fetches keys, and decrypts secrets.
+
+### After Deny
+
+Tapping **❌ Deny** sets status to `denied`:
+
+```
+❌ Denied — my-api
+
+App will crash after timeout.
+
+[Button: View App]
+```
+
+The SDK times out after 5 minutes and throws an error.
+
+## Trusted Restart Notification
+
+When an app restarts with a valid permit token, you receive a silent notification:
+
+```
+Suron — Auto-resumed
+
+App: my-api
+Host: prod-server-01
+
+App restarted after secrets update — permit was valid, no approval needed.
+
+[Button: ⏹ Stop App]
+```
+
+No action required - the app is already running. You can stop it if needed.
+
+## Inline Buttons
+
+The bot uses inline keyboard buttons for quick actions:
+
+| Button | Action | Description |
+|--------|--------|-------------|
+| **✅ Approve** | `approve:{appId}` | Generates permit, sets status to approved |
+| **❌ Deny** | `deny:{appId}` | Sets status to denied |
+| **⏹ Stop App** | `stop:{appId}` | Revokes access, sets status to denied |
+| **View App** | `app:{appId}` | Shows app details |
+| **Logs** | `logs:{appId}` | Shows activity logs |
+| **← All Apps** | `cmd:apps` | Returns to app list |
+| **← Back** | `app:{appId}` | Returns to app detail |
+| **Clear Status** | `clear:{appId}` | Resets status to idle |
+
+## Security
+
+### Admin Authorization
+
+All commands and button taps are checked against `ADMIN_CHAT_ID`:
+
+```javascript
+// worker/src/telegram.js
+function isAdmin(env, userId) {
+  return String(userId) === String(env.ADMIN_CHAT_ID)
+}
+```
+
+If a non-admin user tries to use the bot, they receive:
+```
+Unauthorized
+```
+
+### Webhook Verification
+
+Telegram signs webhook requests. The Worker doesn't explicitly verify signatures (Telegram only sends to the configured webhook URL), but you can add verification:
+
+```javascript
+// Optional: Verify Telegram webhook signature
+const secret = crypto.createHash('sha256')
+  .update(env.BOT_TOKEN)
+  .digest()
+
+// Telegram sends X-Telegram-Bot-Api-Secret-Token header
+const token = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
+if (token !== expectedToken) {
+  return new Response('Unauthorized', { status: 401 })
+}
+```
+
+## Bot Customization
+
+### Change Bot Name
+
+Message @BotFather:
+```
+/setname
+@YourBot
+New Name Here
+```
+
+### Set Bot Description
+
+```
+/setdescription
+@YourBot
+Encrypted secrets manager with approval workflow
+```
+
+### Set Bot Commands Menu
+
+```
+/setcommands
+@YourBot
+
+apps - List all registered apps
+app - View app details
+logs - View activity logs
+stop - Stop a running app
+```
+
+### Change Bot Profile Picture
+
+```
+/setuserpic
+@YourBot
+[Upload image]
+```
+
+## Troubleshooting
+
+### Bot not responding
+
+Check webhook status:
+```bash
+curl https://api.telegram.org/bot<BOT_TOKEN>/getWebhookInfo
+```
+
+Expected response:
+```json
+{
+  "ok": true,
+  "result": {
+    "url": "https://suronai-vault.your-account.workers.dev/webhook",
+    "has_custom_certificate": false,
+    "pending_update_count": 0,
+    "last_error_date": 0
+  }
+}
+```
+
+If `last_error_date` is set, there's an issue with your webhook endpoint. Check Worker logs:
+```bash
+wrangler tail
+```
+
+### "Unauthorized" error when tapping buttons
+
+`ADMIN_CHAT_ID` mismatch. Verify:
+1. Get your actual chat ID: `curl https://api.telegram.org/bot<TOKEN>/getUpdates`
+2. Check `wrangler.toml`: `ADMIN_CHAT_ID = "987654321"`
+3. Redeploy: `wrangler deploy`
+
+### No notifications when app requests access
+
+Check:
+1. **BOT_TOKEN** secret set: `wrangler secret list`
+2. **ADMIN_CHAT_ID** in `wrangler.toml`
+3. Worker logs for errors: `wrangler tail`
+4. Bot can message you (message it first with `/start`)
+
+### Webhook fails to set
+
+Ensure:
+1. Worker is deployed and accessible
+2. URL is HTTPS (Telegram requires it)
+3. BOT_TOKEN is correct
+
+## Testing in Development
+
+For local testing, use polling instead of webhooks:
+
+```javascript
+// Test script: test-bot.js
+import fetch from 'node-fetch'
+
+const TOKEN = process.env.BOT_TOKEN
+let offset = 0
+
+while (true) {
+  const res = await fetch(`https://api.telegram.org/bot${TOKEN}/getUpdates?offset=${offset}`)
+  const { result } = await res.json()
+  
+  for (const update of result) {
+    console.log('Update:', update)
+    offset = update.update_id + 1
+    
+    // Process update here (simulate Worker's handleTelegramWebhook)
+  }
+  
+  await new Promise(r => setTimeout(r, 1000))
+}
+```
+
+Run:
+```bash
+node test-bot.js
+```
+
+<Warning>
+  Don't run polling and webhook simultaneously - it causes duplicate message processing.
+</Warning>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Deploy Worker" icon="cloud" href="/infrastructure/cloudflare-worker">
+    Configure the Worker with your bot token and chat ID
+  </Card>
+  <Card title="Environment Variables" icon="code" href="/infrastructure/environment-variables">
+    Complete reference of all configuration options
+  </Card>
+</CardGroup>

@@ -1,0 +1,182 @@
+---
+title: CLI Overview
+description: Command-line interface for managing encrypted secrets with Suron Vault
+---
+
+The `@suronai/cli` package provides a command-line interface for managing encrypted secrets in your Suron Vault applications. It handles encryption, decryption, key rotation, and secret management through a simple, secure workflow.
+
+## Installation
+
+Install the CLI globally using npm:
+
+```bash
+npm install -g @suronai/cli
+```
+
+Verify the installation:
+
+```bash
+suron --help
+```
+
+## Quick Start
+
+1. **Authenticate** with your Suron Worker:
+
+   ```bash
+   suron login
+   ```
+
+2. **Initialize** your application:
+
+   ```bash
+   suron init --app myapp
+   ```
+
+3. **Encrypt** your `.env` file:
+
+   ```bash
+   suron encrypt
+   ```
+
+4. **Add secrets** individually:
+
+   ```bash
+   suron add API_KEY sk_live_abc123
+   ```
+
+5. **Run** your application with decrypted secrets:
+
+   ```bash
+   suron run server.js
+   ```
+
+## Common Workflows
+
+### Setting Up a New Project
+
+```bash
+# Authenticate the CLI
+suron login
+
+# Initialize your app and generate master key
+suron init --app myapp
+
+# Encrypt existing .env file
+suron encrypt
+
+# Commit .env.suron to version control
+git add .env.suron
+git commit -m "Add encrypted secrets"
+```
+
+### Managing Secrets
+
+```bash
+# List all secret keys
+suron list
+
+# Add or update a secret
+suron add DATABASE_URL postgres://...
+
+# View a decrypted value
+suron decrypt DATABASE_URL
+
+# Remove a secret
+suron remove OLD_API_KEY
+```
+
+### Running Applications
+
+```bash
+# Run with decrypted secrets injected
+suron run server.js
+
+# Works with any Node.js script
+suron run scripts/migrate.js
+```
+
+### Key Rotation
+
+```bash
+# Rotate master key and re-encrypt all secrets
+suron rotate
+
+# Redeploy your application after rotation
+```
+
+## Command Categories
+
+### Authentication
+- [suron login](/cli/authentication#login) - Authenticate with username and password
+- [suron logout](/cli/authentication#logout) - Clear local session
+
+### Setup Commands
+- [suron init](/cli/commands/init) - Create app and generate master key
+- [suron encrypt](/cli/commands/encrypt) - Encrypt .env file and push to vault
+
+### Secret Management
+- [suron add](/cli/commands/add) - Add or update a secret
+- [suron remove](/cli/commands/remove) - Remove a secret
+- [suron list](/cli/commands/list) - List all secret keys
+- [suron decrypt](/cli/commands/decrypt) - Print a decrypted value
+
+### Maintenance
+- [suron rotate](/cli/commands/rotate) - Rotate master key and re-encrypt
+- [suron run](/cli/commands/run) - Run scripts with secrets injected
+
+## Global Flags
+
+The following flags work across multiple commands:
+
+<ParamField path="--app" type="string">
+  App name (overrides `.env.suron` or `VAULT_APP_ID` environment variable)
+</ParamField>
+
+<ParamField path="--file" type="string">
+  Source env file for encrypt command (default: `.env`)
+</ParamField>
+
+<ParamField path="--yes" type="boolean">
+  Non-interactive mode - skip all prompts (short: `-y`)
+</ParamField>
+
+## File Structure
+
+The CLI works with these files:
+
+- `.env` - Plaintext secrets (local development only, never commit)
+- `.env.suron` - Encrypted secrets (commit to version control)
+- `~/.suron/auth.json` - CLI authentication credentials
+- `.gitignore` - Automatically updated to exclude `.env` files
+
+## Authentication Required
+
+All commands except `login` and `logout` require authentication. If you're not logged in:
+
+```bash
+✗ Not logged in — run: suron login
+```
+
+See the [Authentication](/cli/authentication) guide for details.
+
+## Error Handling
+
+The CLI provides clear error messages:
+
+```bash
+# Missing required parameter
+✗ Usage: suron add KEY value [--app name]
+
+# App not initialized
+✗ App name not found — run: suron init --app yourapp
+
+# Secret not found
+✗ Secret not found: API_KEY
+```
+
+## Next Steps
+
+- Learn about [authentication](/cli/authentication)
+- Explore individual [commands](/cli/commands/init)
+- See the [SDK integration guide](/sdk/overview)

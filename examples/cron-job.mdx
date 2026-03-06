@@ -1,0 +1,198 @@
+---
+title: Cron Job
+description: Background worker with scheduled jobs using Suron Vault secrets
+---
+
+Background worker / scheduled job using secrets from the vault. All cron callbacks close over `process.env` — they automatically have access to the decrypted secrets after `vault.load()` completes once at startup.
+
+## Complete Example
+
+<CodeGroup>
+
+```javascript index.js
+import { vault } from '@suronai/sdk'
+import cron      from 'node-cron'
+
+// Load secrets before scheduling any jobs.
+// All cron callbacks close over process.env — they'll have the decrypted values.
+await vault.load()
+
+console.log('Secrets loaded — scheduling jobs')
+
+// Job 1: Run every minute — fetch data from an external API using a secret key
+cron.schedule('* * * * *', async () => {
+  console.log('[job:fetch] Running at', new Date().toISOString())
+
+  try {
+    const res = await fetch('https://api.example.com/data', {
+      headers: { 'Authorization': `Bearer ${process.env.API_KEY}` }
+    })
+
+    if (!res.ok) throw new Error(`API returned ${res.status}`)
+
+    const data = await res.json()
+    console.log('[job:fetch] Got', data.length ?? 1, 'records')
+
+    // Process data...
+  } catch (err) {
+    console.error('[job:fetch] Failed:', err.message)
+  }
+})
+
+// Job 2: Run every hour — send a Slack notification using a webhook secret
+cron.schedule('0 * * * *', async () => {
+  console.log('[job:notify] Sending hourly report')
+
+  try {
+    await fetch(process.env.WEBHOOK_URL, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({
+        text: `Hourly report — ${new Date().toUTCString()}\nAll systems nominal.`
+      })
+    })
+    console.log('[job:notify] Sent')
+  } catch (err) {
+    console.error('[job:notify] Failed:', err.message)
+  }
+})
+
+// Job 3: Run at midnight every day — cleanup using a database connection string
+cron.schedule('0 0 * * *', async () => {
+  console.log('[job:cleanup] Running daily cleanup')
+  // process.env.DATABASE_URL available here if you encrypted it
+  // const pool = ... (create pool once BELOW vault.load() and reuse it here)
+})
+
+console.log('All jobs scheduled — running')
+```
+
+```json package.json
+{
+  "name": "suron-example-cron",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@suronai/sdk": "^1.0.1",
+    "node-cron": "^3.0.3"
+  }
+}
+```
+
+```env .env.example
+VAULT_WORKER_URL=https://suronai-vault.your-account.workers.dev
+VAULT_ACCESS_TOKEN=your_server_access_token
+VAULT_APP_ID=my-cron-job
+API_KEY=your-api-key
+REPORT_EMAIL=alerts@yourcompany.com
+WEBHOOK_URL=https://hooks.slack.com/your-webhook
+```
+
+</CodeGroup>
+
+## Setup Instructions
+
+```bash
+cp .env.example .env
+npm install
+npm start
+```
+
+## Key Pattern
+
+```javascript
+import { vault } from '@suronai/sdk'
+import cron      from 'node-cron'
+
+await vault.load()   // runs once at startup, blocks until approved
+
+// All cron jobs below have access to decrypted secrets via process.env
+cron.schedule('* * * * *', async () => {
+  await fetch('https://api.example.com', {
+    headers: { Authorization: `Bearer ${process.env.API_KEY}` }
+  })
+})
+```
+
+<Note>
+  `vault.load()` only runs **once** at startup. After that, all scheduled jobs have access to the decrypted secrets in `process.env` for the lifetime of the process.
+</Note>
+
+## Adding Secrets
+
+Add secrets to your vault using the CLI:
+
+```bash
+suron add API_KEY your-api-key
+suron add WEBHOOK_URL https://hooks.slack.com/your-webhook
+```
+
+## Cron Schedule Examples
+
+The example includes three different schedule patterns:
+
+| Schedule | Description |
+|----------|-------------|
+| `* * * * *` | Every minute |
+| `0 * * * *` | Every hour (at minute 0) |
+| `0 0 * * *` | Every day at midnight |
+
+<Tip>
+  For more complex schedules, see the [node-cron documentation](https://www.npmjs.com/package/node-cron). The format is: `minute hour day month weekday`.
+</Tip>
+
+## Job Examples
+
+### Job 1: Fetch Data
+
+Runs every minute to fetch data from an external API using `API_KEY`:
+
+```javascript
+cron.schedule('* * * * *', async () => {
+  const res = await fetch('https://api.example.com/data', {
+    headers: { 'Authorization': `Bearer ${process.env.API_KEY}` }
+  })
+  const data = await res.json()
+  // Process data...
+})
+```
+
+### Job 2: Send Notifications
+
+Runs every hour to send a Slack notification using `WEBHOOK_URL`:
+
+```javascript
+cron.schedule('0 * * * *', async () => {
+  await fetch(process.env.WEBHOOK_URL, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ text: 'Hourly report' })
+  })
+})
+```
+
+### Job 3: Database Cleanup
+
+Runs daily at midnight for cleanup tasks:
+
+```javascript
+cron.schedule('0 0 * * *', async () => {
+  // Create your database pool once after vault.load()
+  // and reuse it in all cron jobs
+  await pool.query('DELETE FROM sessions WHERE expires_at < NOW()')
+})
+```
+
+## Dependencies
+
+- `@suronai/sdk` ^1.0.1
+- `node-cron` ^3.0.3
+
+## GitHub Source
+
+View the complete source code:
+
+[github.com/Cryptoistaken/Suron/tree/main/examples/05-cron-job](https://github.com/Cryptoistaken/Suron/tree/main/examples/05-cron-job)

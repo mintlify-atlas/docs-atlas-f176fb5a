@@ -1,0 +1,195 @@
+---
+title: suron init
+description: Initialize a new Suron Vault application and generate a master key
+---
+
+The `init` command creates a new Suron Vault application and generates a cryptographically secure master key. This is the first command you run when setting up Suron Vault for a project.
+
+## Usage
+
+```bash
+suron init [--app name] [--yes]
+```
+
+## Parameters
+
+<ParamField path="--app" type="string">
+  Application name. If not provided, you'll be prompted interactively (unless `--yes` is set).
+</ParamField>
+
+<ParamField path="--yes" type="boolean">
+  Non-interactive mode. Requires `--app` to be specified. Short form: `-y`
+</ParamField>
+
+## Examples
+
+### Interactive Mode
+
+```bash
+suron init
+```
+
+Output:
+
+```bash
+? App name: myapp
+⋯ Initializing myapp
+✓ myapp initialized
+  Master key stored remotely — no local key files
+  .env.suron created — run: suron encrypt
+✓ .gitignore updated — added: .env, .env.local, .env.*.local, .vault-permit
+```
+
+### Non-Interactive Mode
+
+```bash
+suron init --app myapp --yes
+```
+
+Output:
+
+```bash
+⋯ Initializing myapp
+✓ myapp initialized
+  Master key stored remotely — no local key files
+  .env.suron created — run: suron encrypt
+✓ .gitignore created
+```
+
+### With Custom App Name
+
+```bash
+suron init --app production-api
+```
+
+## What It Does
+
+1. **Prompts for app name** (if not provided via `--app`)
+2. **Generates a master key** using cryptographically secure random bytes
+3. **Splits the key** into two halves:
+   - `convexHalf` - Stored in Convex database
+   - `cfHalf` - Stored in Cloudflare KV
+4. **Sends key halves** to Worker via `POST /admin/init`
+5. **Creates `.env.suron`** stub file with app identifier:
+   ```
+   # Encrypted with @suronai/cli
+   VAULT_APP=myapp
+   ```
+6. **Updates `.gitignore`** to exclude sensitive files
+
+## Security Model
+
+The master key is split using the following approach:
+
+- **Generated locally** using Node.js `crypto.randomBytes(64)`
+- **Split into two 32-byte halves**
+- **Never stored in one location** - distributed across Convex and Cloudflare KV
+- **No local key files** - keys only exist in remote storage and memory during operations
+
+This "split key" architecture ensures that compromising a single storage backend does not expose your secrets.
+
+## Gitignore Management
+
+The command automatically adds these entries to `.gitignore`:
+
+```
+.env
+.env.local
+.env.*.local
+.vault-permit
+```
+
+### Existing `.gitignore`
+
+If `.gitignore` already exists, only missing entries are added:
+
+```bash
+✓ .gitignore updated — added: .env, .env.local
+```
+
+If all entries already exist:
+
+```bash
+  .gitignore already covers .env files
+```
+
+### New `.gitignore`
+
+If no `.gitignore` exists, a new one is created:
+
+```bash
+✓ .gitignore created
+```
+
+## Files Created
+
+### `.env.suron`
+
+A stub vault file with your app identifier:
+
+```
+# Encrypted with @suronai/cli
+VAULT_APP=myapp
+```
+
+This file should be committed to version control. It will be populated with encrypted secrets when you run `suron encrypt`.
+
+## Error Cases
+
+### Missing App Name in Non-Interactive Mode
+
+```bash
+suron init --yes
+```
+
+Output:
+
+```bash
+✗ --app name is required in non-interactive mode
+```
+
+Solution: Provide `--app`:
+
+```bash
+suron init --app myapp --yes
+```
+
+### Empty App Name
+
+If you press Enter without providing a name:
+
+```bash
+? App name: 
+✗ App name is required
+```
+
+### Not Logged In
+
+```bash
+✗ Not logged in — run: suron login
+```
+
+Solution: [Authenticate first](/cli/authentication#login)
+
+### Network Errors
+
+```bash
+✗ Could not connect to Suron Worker
+```
+
+Verify your Worker is deployed and accessible.
+
+## Next Steps
+
+After initializing your app:
+
+1. **Create a `.env` file** with your plaintext secrets
+2. **Encrypt the secrets**: `suron encrypt`
+3. **Commit `.env.suron`** to version control
+4. **Add `.env` to `.gitignore`** (done automatically)
+
+## Related Commands
+
+- [suron encrypt](/cli/commands/encrypt) - Encrypt your `.env` file
+- [suron add](/cli/commands/add) - Add individual secrets
+- [suron list](/cli/commands/list) - List encrypted secrets

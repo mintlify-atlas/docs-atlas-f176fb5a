@@ -1,0 +1,252 @@
+---
+title: "vault.load()"
+description: "Load encrypted secrets with Telegram approval"
+---
+
+## Overview
+
+`vault.load()` is the primary method for loading encrypted secrets into your application. It handles the complete approval flow, secret decryption, and heartbeat initialization.
+
+<Warning>
+  `vault.load()` **must** be called before any other application code that depends on secrets. It blocks execution until secrets are loaded.
+</Warning>
+
+## Function Signature
+
+```javascript
+async function load(): Promise<void>
+```
+
+**Returns:** Promise that resolves when secrets are loaded into `process.env`
+
+**Throws:** Error if approval is denied, times out, or vault doesn't exist
+
+## Basic Usage
+
+```javascript
+import { vault } from '@suronai/sdk'
+
+// Block until secrets are loaded
+await vault.load()
+
+// Secrets are now available
+console.log('Database URL:', process.env.DATABASE_URL)
+console.log('API Key set:', !!process.env.API_KEY)
+```
+
+## Approval Flow
+
+When you call `vault.load()`, it follows this sequence:
+
+<Steps>
+  <Step title="Check for permit token">
+    If a permit token exists in memory or `VAULT_PERMIT` env var, attempt [trusted restart](/sdk/trusted-restart)
+  </Step>
+  
+  <Step title="Send access request">
+    If no permit or permit is invalid, send request to vault worker with server hostname
+  </Step>
+  
+  <Step title="Notify admin via Telegram">
+    Admin receives notification: "Access requested from hostname: your-server"
+  </Step>
+  
+  <Step title="Poll for approval">
+    SDK polls every 3 seconds for up to 5 minutes
+  </Step>
+  
+  <Step title="Decrypt secrets">
+    On approval, fetch vault data and reconstruct master key from two halves
+  </Step>
+  
+  <Step title="Load into process.env">
+    Decrypt each secret and inject into `process.env`
+  </Step>
+  
+  <Step title="Start heartbeat">
+    Begin 30-second heartbeat to detect revocations and vault updates
+  </Step>
+</Steps>
+
+## Blocking Behavior
+
+`vault.load()` is **intentionally blocking** — your application will not start until secrets are loaded:
+
+```javascript
+import { vault } from '@suronai/sdk'
+import express from 'express'
+
+// ⏸️ Execution pauses here until approved
+await vault.load()
+
+// ✅ Server only starts after secrets are loaded
+const app = express()
+app.listen(3000)
+```
+
+This ensures you never start a server with missing secrets.
+
+## Trusted Restart Optimization
+
+If `vault.load()` finds a permit token (either in memory from a previous call in the same process, or from `VAULT_PERMIT` env var), it attempts a **trusted restart**:
+
+```javascript
+// From vault.js source (line 59-85)
+if (_permitToken) {
+  log.info('Permit found — attempting trusted restart')
+
+  const resume = await post(workerUrl, '/resume', {
+    appId,
+    permitToken:       _permitToken,
+    hostname:          host,
+    knownVaultVersion: _knownVaultVersion,
+  }, token)
+
+  if (resume.ok) {
+    // Permit accepted — skip Telegram approval
+    log.success('Trusted restart approved — reloading secrets')
+    const loaded = await fetchAndDecrypt(workerUrl, appId, token)
+    await post(workerUrl, '/loaded', { appId }, token)
+    log.success(`${loaded} secrets reloaded`)
+    startHeartbeat(workerUrl, appId, token)
+    return  // ← Exit early, no Telegram approval needed
+  }
+
+  // Permit rejected (expired or revoked) — fall through to full approval
+  log.warning(`Permit ${resume.reason ?? 'invalid'} — requesting fresh approval`)
+  _permitToken = null
+}
+```
+
+<Info>
+  Permits are valid for 24 hours and automatically refresh on each heartbeat. See [Trusted Restart](/sdk/trusted-restart) for persistence strategies.
+</Info>
+
+## Error Handling
+
+`vault.load()` throws errors in these scenarios:
+
+### Missing Environment Variables
+
+```javascript
+try {
+  await vault.load()
+} catch (error) {
+  // Error: Missing required env var: VAULT_WORKER_URL
+  // Error: Missing required env var: VAULT_ACCESS_TOKEN
+  // Error: VAULT_APP_ID is required — add it to your server .env
+}
+```
+
+### Vault Not Found
+
+```javascript
+try {
+  await vault.load()
+} catch (error) {
+  // Error: No vault found for "my-app" — run: suron encrypt
+}
+```
+
+This happens when you haven't created a vault yet. Run `suron encrypt` to create one.
+
+### Access Denied
+
+```javascript
+try {
+  await vault.load()
+} catch (error) {
+  // Error: Access denied by admin
+}
+```
+
+Admin tapped **Deny** in Telegram.
+
+### Approval Timeout
+
+```javascript
+try {
+  await vault.load()
+} catch (error) {
+  // Error: No response after 5 minutes — access denied by timeout
+}
+```
+
+No response from admin within 5 minutes.
+
+## Production Example
+
+```javascript
+import { vault } from '@suronai/sdk'
+import express from 'express'
+
+const app = express()
+const port = process.env.PORT || 3000
+
+try {
+  // Load secrets with approval
+  await vault.load()
+  
+  // Secrets loaded — start server
+  app.get('/health', (req, res) => {
+    res.json({
+      status: 'ok',
+      database: !!process.env.DATABASE_URL,
+      apiKey: !!process.env.API_KEY,
+    })
+  })
+  
+  app.listen(port, () => {
+    console.log(`Server running on port ${port}`)
+  })
+  
+} catch (error) {
+  console.error('Failed to load vault:', error.message)
+  process.exit(1)
+}
+```
+
+## Internal Implementation
+
+From `/home/daytona/workspace/source/SDK/src/vault.js:48-114`:
+
+<ParamField path="workerUrl" type="string">
+  Read from `VAULT_WORKER_URL` environment variable
+</ParamField>
+
+<ParamField path="token" type="string">
+  Read from `VAULT_ACCESS_TOKEN` environment variable
+</ParamField>
+
+<ParamField path="appId" type="string">
+  Read from `VAULT_APP_ID` environment variable
+</ParamField>
+
+The function performs these operations:
+
+1. Validates required environment variables
+2. Gets server hostname via `os.hostname()`
+3. Checks for permit token in `_permitToken` module variable or `VAULT_PERMIT` env var
+4. If permit exists, attempts `/resume` endpoint (trusted restart)
+5. If no permit or permit invalid, sends `/request` to trigger Telegram notification
+6. Polls `/status` endpoint every 3 seconds until approved/denied
+7. On approval, stores permit token in memory
+8. Fetches vault data via `/fetch-vault`
+9. Fetches key halves via `/keys` and joins them
+10. Decrypts secrets and injects into `process.env`
+11. Notifies worker via `/loaded`
+12. Starts heartbeat for monitoring
+
+## Related
+
+<CardGroup cols={2}>
+
+<Card title="Trusted Restart" icon="shield-check" href="/sdk/trusted-restart">
+  Skip approval using permit tokens
+</Card>
+
+<Card title="Hot Reload" icon="arrows-rotate" href="/sdk/hot-reload">
+  Automatic updates after initial load
+</Card>
+
+</CardGroup>

@@ -1,0 +1,158 @@
+---
+title: Fastify API
+description: Fastify server with Suron Vault integration and webhook security
+---
+
+Fastify server with secrets loaded before `app.listen()`. Includes examples of using secrets for webhook signature verification with timing-safe comparison.
+
+## Complete Example
+
+<CodeGroup>
+
+```javascript index.js
+import { vault }                    from '@suronai/sdk'
+import Fastify                      from 'fastify'
+import { timingSafeEqual }          from 'crypto'
+
+// Load secrets before creating the Fastify instance.
+// The server will not start until vault.load() resolves.
+await vault.load()
+
+const app  = Fastify({ logger: true })
+const port = Number(process.env.PORT) || 3000
+
+// Health check
+app.get('/health', async () => ({
+  status:  'ok',
+  app:     process.env.VAULT_APP_ID,
+  secrets: 'loaded',
+}))
+
+// Example: route that uses a secret from the vault
+app.get('/api/info', async () => ({
+  serviceUrl: process.env.SERVICE_URL,
+  region:     process.env.REGION,
+}))
+
+// Example: webhook handler using a signing secret from vault
+app.post('/api/webhook', async (request, reply) => {
+  const signature = request.headers['x-signature']
+
+  // process.env.WEBHOOK_SECRET was loaded by vault.load()
+  // Use timingSafeEqual to prevent timing attacks on secret comparison
+  const expected = process.env.WEBHOOK_SECRET ?? ''
+  const safe     = signature?.length === expected.length &&
+    timingSafeEqual(Buffer.from(signature), Buffer.from(expected))
+  if (!safe) {
+    return reply.status(401).send({ error: 'Invalid signature' })
+  }
+
+  const { event, data } = request.body
+  app.log.info({ event, data }, 'Webhook received')
+
+  return { ok: true }
+})
+
+try {
+  await app.listen({ port, host: '0.0.0.0' })
+} catch (err) {
+  app.log.error(err)
+  process.exit(1)
+}
+```
+
+```json package.json
+{
+  "name": "suron-example-fastify",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "@suronai/sdk": "^1.0.1",
+    "fastify": "^4.26.0"
+  }
+}
+```
+
+```env .env.example
+VAULT_WORKER_URL=https://suronai-vault.your-account.workers.dev
+VAULT_ACCESS_TOKEN=your_server_access_token
+VAULT_APP_ID=my-fastify-app
+PORT=3000
+```
+
+</CodeGroup>
+
+## Setup Instructions
+
+```bash
+cp .env.example .env
+npm install
+npm start
+```
+
+## Key Pattern
+
+```javascript
+import { vault } from '@suronai/sdk'
+import Fastify   from 'fastify'
+
+await vault.load()   // blocks until approved
+
+const app = Fastify({ logger: true })
+
+app.get('/health', async () => ({ status: 'ok' }))
+
+await app.listen({ port: 3000, host: '0.0.0.0' })
+```
+
+<Note>
+  The Fastify instance is created **after** `vault.load()`, ensuring all secrets are available before any routes are registered or the server starts listening.
+</Note>
+
+## Adding Secrets
+
+Add secrets to your vault using the CLI:
+
+```bash
+suron add SERVICE_URL https://api.yourservice.com
+suron add WEBHOOK_SECRET your-webhook-signing-secret
+suron add REGION us-east-1
+```
+
+## Webhook Security
+
+This example demonstrates secure webhook signature verification:
+
+```javascript
+import { timingSafeEqual } from 'crypto'
+
+const signature = request.headers['x-signature']
+const expected = process.env.WEBHOOK_SECRET ?? ''
+
+// Use timingSafeEqual to prevent timing attacks
+const safe = signature?.length === expected.length &&
+  timingSafeEqual(Buffer.from(signature), Buffer.from(expected))
+
+if (!safe) {
+  return reply.status(401).send({ error: 'Invalid signature' })
+}
+```
+
+<Tip>
+  Always use `timingSafeEqual` for comparing secrets to prevent timing-based attacks. Regular string comparison (`===`) can leak information through timing differences.
+</Tip>
+
+## Dependencies
+
+- `@suronai/sdk` ^1.0.1
+- `fastify` ^4.26.0
+
+## GitHub Source
+
+View the complete source code:
+
+[github.com/Cryptoistaken/Suron/tree/main/examples/03-fastify-api](https://github.com/Cryptoistaken/Suron/tree/main/examples/03-fastify-api)

@@ -1,0 +1,223 @@
+---
+title: suron add
+description: Add or update a secret in your Suron Vault
+---
+
+The `add` command adds a new secret or updates an existing one in your vault. The secret is encrypted locally using your master key and automatically pushed to Suron.
+
+## Usage
+
+```bash
+suron add KEY value [--app name]
+```
+
+## Parameters
+
+<ParamField path="KEY" type="string" required>
+  The secret key name (e.g., `DATABASE_URL`, `API_KEY`). First positional argument.
+</ParamField>
+
+<ParamField path="value" type="string" required>
+  The plaintext secret value. Second positional argument.
+</ParamField>
+
+<ParamField path="--app" type="string">
+  App name. If not provided, reads from `.env.suron` file.
+</ParamField>
+
+## Examples
+
+### Add a New Secret
+
+```bash
+suron add DATABASE_URL postgres://user:pass@localhost/db
+```
+
+Output:
+
+```bash
+⋯ Pushing to Suron...
+✓ DATABASE_URL added and pushed
+```
+
+### Update an Existing Secret
+
+```bash
+suron add API_KEY sk_live_new_key
+```
+
+Output:
+
+```bash
+⋯ Pushing to Suron...
+✓ API_KEY updated and pushed
+```
+
+### With Spaces in Value
+
+Quote values containing spaces:
+
+```bash
+suron add SESSION_SECRET "my secret key with spaces"
+```
+
+### Specify App Name
+
+```bash
+suron add DATABASE_URL postgres://localhost/db --app staging
+```
+
+## How It Works
+
+1. **Parses KEY and value** from command arguments
+2. **Resolves app name** from `--app` flag or `.env.suron` file
+3. **Fetches master key** from Worker
+4. **Encrypts the value** using AES-256-GCM
+5. **Reads existing vault** from `.env.suron`
+6. **Updates or appends** the secret
+7. **Writes updated vault** to `.env.suron`
+8. **Automatically pushes** to Worker via `POST /admin/upload`
+
+## Vault File Updates
+
+The `.env.suron` file is updated in place:
+
+**Before:**
+```bash
+# Encrypted with @suronai/cli
+VAULT_APP=myapp
+API_KEY=enc:sv1:b2xkX3ZhbHVl...
+```
+
+**After adding `DATABASE_URL`:**
+```bash
+# Encrypted with @suronai/cli
+VAULT_APP=myapp
+API_KEY=enc:sv1:b2xkX3ZhbHVl...
+DATABASE_URL=enc:sv1:bmV3X3ZhbHVl...
+```
+
+**After updating `API_KEY`:**
+```bash
+# Encrypted with @suronai/cli
+VAULT_APP=myapp
+API_KEY=enc:sv1:dXBkYXRlZF92YWx1ZQ...
+DATABASE_URL=enc:sv1:bmV3X3ZhbHVl...
+```
+
+## Add vs Update
+
+The command automatically detects whether to add or update:
+
+- **Add**: Key doesn't exist in vault → appends to end
+- **Update**: Key already exists → replaces encrypted value in place
+
+The output message reflects the action taken:
+
+```bash
+✓ DATABASE_URL added and pushed      # New secret
+✓ API_KEY updated and pushed         # Existing secret
+```
+
+## Automatic Push
+
+After updating the local vault file, the command automatically uploads to Worker:
+
+```bash
+⋯ Pushing to Suron...
+✓ DATABASE_URL added and pushed
+```
+
+No separate `suron upload` step is required.
+
+## Error Cases
+
+### Missing Arguments
+
+```bash
+suron add DATABASE_URL
+```
+
+Output:
+
+```bash
+✗ Usage: suron add KEY value [--app name]
+```
+
+### Missing App Name
+
+```bash
+suron add API_KEY secret
+```
+
+Output (if no `.env.suron` exists):
+
+```bash
+✗ App name not found — run: suron init --app yourapp
+```
+
+Solution: [Initialize first](/cli/commands/init) or provide `--app`:
+
+```bash
+suron add API_KEY secret --app myapp
+```
+
+### Not Logged In
+
+```bash
+✗ Not logged in — run: suron login
+```
+
+Solution: [Authenticate first](/cli/authentication#login)
+
+## Command Line Quoting
+
+Values with special characters should be quoted:
+
+```bash
+# Spaces
+suron add SECRET "value with spaces"
+
+# Special characters
+suron add PASSWORD "p@ssw0rd!#$"
+
+# URLs
+suron add DATABASE_URL "postgres://user:pass@host:5432/db?ssl=true"
+
+# JSON (escape quotes in shell)
+suron add CONFIG '{"key": "value"}'
+```
+
+## Best Practices
+
+1. **Quote values** - Always quote values containing spaces or special characters
+2. **Use descriptive keys** - e.g., `DATABASE_URL` not `DB`
+3. **Update, don't duplicate** - The command handles updates automatically
+4. **Verify after adding** - Use `suron list` or `suron decrypt KEY`
+5. **Commit changes** - Remember to commit updated `.env.suron`
+
+## Workflow Example
+
+```bash
+# Add database credentials
+suron add DATABASE_URL postgres://localhost/mydb
+suron add DATABASE_PASSWORD "secure-password-123"
+
+# Add API keys
+suron add STRIPE_SECRET_KEY sk_live_abc123
+suron add STRIPE_PUBLISHABLE_KEY pk_live_xyz789
+
+# Verify
+suron list
+
+# Commit to version control
+git add .env.suron
+git commit -m "Add payment integration secrets"
+```
+
+## Related Commands
+
+- [suron list](/cli/commands/list) - List all secrets
+- [suron decrypt](/cli/commands/decrypt) - View a decrypted value
+- [suron remove](/cli/commands/remove) - Remove a secret
+- [suron encrypt](/cli/commands/encrypt) - Bulk encrypt from .env file

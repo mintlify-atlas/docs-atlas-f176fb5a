@@ -1,0 +1,227 @@
+---
+title: Authentication
+description: Authenticate the Suron CLI with your Worker instance
+---
+
+The Suron CLI requires authentication to interact with your Worker instance. Authentication credentials are stored locally and used for all subsequent commands.
+
+## Login
+
+Authenticate the CLI with your Suron Worker:
+
+```bash
+suron login
+```
+
+### Interactive Prompt
+
+The login command prompts for three pieces of information:
+
+```bash
+  Welcome to Suron
+  Enter your credentials to authenticate the CLI
+
+? Suron Worker URL: https://vault.yourcompany.workers.dev
+? Username: admin
+? Password: ********
+
+⋯ Authenticating...
+✓ Logged in successfully
+  Session saved to ~/.suron/auth.json
+```
+
+### Required Information
+
+<ParamField path="Suron Worker URL" type="string" required>
+  The full URL of your deployed Suron Worker (e.g., `https://vault.example.workers.dev`)
+</ParamField>
+
+<ParamField path="Username" type="string" required>
+  Admin username configured in your Worker environment variables
+</ParamField>
+
+<ParamField path="Password" type="string" required>
+  Admin password configured in your Worker environment variables. Input is hidden during entry.
+</ParamField>
+
+## Session Management
+
+### Authentication File
+
+Credentials are stored in `~/.suron/auth.json`:
+
+```json
+{
+  "workerUrl": "https://vault.yourcompany.workers.dev",
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+}
+```
+
+<Warning>
+  This file contains sensitive authentication tokens. Ensure it has proper file permissions (600) and is never committed to version control.
+</Warning>
+
+### File Location
+
+The authentication file is stored at:
+
+- **Unix/Linux/macOS**: `~/.suron/auth.json`
+- **Windows**: `C:\Users\<username>\.suron\auth.json`
+
+The directory is created automatically on first login.
+
+### Re-authentication
+
+If you run `login` while already authenticated, you'll see a warning:
+
+```bash
+⚠ Already logged in. Logging in again will replace your session.
+```
+
+The command proceeds and replaces your existing session with new credentials.
+
+## Logout
+
+Clear your local authentication session:
+
+```bash
+suron logout
+```
+
+Output:
+
+```bash
+✓ Logged out — session cleared
+```
+
+The `~/.suron/auth.json` file is cleared but not deleted:
+
+```json
+{}
+```
+
+### When Not Logged In
+
+If you run `logout` without an active session:
+
+```bash
+⚠ You are not currently logged in
+```
+
+## Authentication Flow
+
+1. **User runs `suron login`** and provides credentials
+2. **CLI sends credentials** to `POST /admin/login` endpoint on Worker
+3. **Worker validates credentials** against environment variables
+4. **Worker returns JWT token** if credentials are valid
+5. **CLI saves token** to `~/.suron/auth.json`
+6. **Token is included** in all subsequent API requests via `Authorization` header
+
+## Token Management
+
+### Token Usage
+
+The saved token is automatically included in all authenticated requests:
+
+```javascript
+// Internal CLI behavior
+headers: {
+  'Authorization': `Bearer ${token}`,
+  'Content-Type': 'application/json'
+}
+```
+
+### Token Expiration
+
+Tokens are JWT (JSON Web Tokens) with configurable expiration. If your token expires:
+
+```bash
+✗ Authentication failed: Token expired
+```
+
+Simply run `suron login` again to obtain a new token.
+
+## Authentication Errors
+
+### Invalid Credentials
+
+```bash
+⋯ Authenticating...
+✗ Invalid username or password
+```
+
+Double-check your username and password against your Worker configuration.
+
+### Connection Errors
+
+```bash
+✗ Could not connect to Suron: fetch failed
+```
+
+Verify:
+- Worker URL is correct and accessible
+- Worker is deployed and running
+- Network connection is available
+
+### Server Errors
+
+```bash
+✗ Authentication failed: Internal server error
+```
+
+Check your Worker logs for details.
+
+## Command Authentication
+
+### Public Commands
+
+These commands do NOT require authentication:
+
+- `suron login`
+- `suron logout`
+- `suron --help` (implicit)
+
+### Protected Commands
+
+All other commands require authentication:
+
+- `suron init`
+- `suron encrypt`
+- `suron add`
+- `suron remove`
+- `suron list`
+- `suron decrypt`
+- `suron rotate`
+- `suron run`
+- `suron upload`
+
+If you attempt a protected command without authentication:
+
+```bash
+✗ Not logged in — run: suron login
+```
+
+## Security Best Practices
+
+1. **Never commit** `~/.suron/auth.json` to version control
+2. **Use strong passwords** for Worker admin credentials
+3. **Rotate credentials** periodically
+4. **Limit access** to the `~/.suron/` directory (chmod 700)
+5. **Use environment-specific** Worker instances (dev, staging, production)
+6. **Logout on shared systems** when finished
+
+## Environment Variables
+
+While the authentication file is the primary method, you can also configure the Worker URL via environment variable:
+
+```bash
+export SURON_WORKER_URL=https://vault.example.workers.dev
+```
+
+However, the CLI currently requires interactive login and does not support token-based environment variable authentication.
+
+## Next Steps
+
+- [Initialize your first app](/cli/commands/init)
+- [Encrypt your secrets](/cli/commands/encrypt)
+- [Manage secrets](/cli/commands/add)

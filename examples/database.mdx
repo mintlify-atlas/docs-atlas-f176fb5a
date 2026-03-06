@@ -1,0 +1,189 @@
+---
+title: Database Connection
+description: PostgreSQL connection using DATABASE_URL from Suron Vault
+---
+
+Express API with a PostgreSQL connection using `DATABASE_URL` from the vault. The database pool is only created **after** `vault.load()` — so the connection string is guaranteed to be decrypted and in `process.env` before `pg.Pool` ever sees it.
+
+## Complete Example
+
+<CodeGroup>
+
+```javascript index.js
+import { vault } from '@suronai/sdk'
+import express   from 'express'
+import pg        from 'pg'
+
+// vault.load() MUST come before creating the database pool.
+// DATABASE_URL is encrypted in .env.suron — it doesn't exist in process.env yet.
+await vault.load()
+
+// Now DATABASE_URL is decrypted in process.env — safe to create the pool.
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL })
+
+// Verify the connection immediately after secrets are loaded
+try {
+  await pool.query('SELECT 1')
+  console.log('Database connected')
+} catch (err) {
+  console.error('Database connection failed:', err.message)
+  process.exit(1)
+}
+
+const app  = express()
+const port = process.env.PORT || 3000
+
+app.use(express.json())
+
+// List users from the database
+app.get('/users', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT id, name, email, created_at FROM users ORDER BY created_at DESC LIMIT 50'
+    )
+    res.json(rows)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// Get single user
+app.get('/users/:id', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT id, name, email, created_at FROM users WHERE id = $1',
+      [req.params.id]
+    )
+    if (!rows.length) return res.status(404).json({ error: 'Not found' })
+    res.json(rows[0])
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// Create user
+app.post('/users', async (req, res) => {
+  const { name, email } = req.body
+  if (!name || !email) return res.status(400).json({ error: 'name and email required' })
+
+  try {
+    const { rows } = await pool.query(
+      'INSERT INTO users (name, email, created_at) VALUES ($1, $2, NOW()) RETURNING *',
+      [name, email]
+    )
+    res.status(201).json(rows[0])
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+app.get('/health', async (req, res) => {
+  try {
+    await pool.query('SELECT 1')
+    res.json({ status: 'ok', database: 'connected' })
+  } catch {
+    res.status(503).json({ status: 'error', database: 'disconnected' })
+  }
+})
+
+app.listen(port, () => {
+  console.log(`Server listening on port ${port}`)
+})
+```
+
+```json package.json
+{
+  "name": "suron-example-database",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@suronai/sdk": "^1.0.1",
+    "express": "^4.18.2",
+    "pg": "^8.11.3"
+  }
+}
+```
+
+```env .env.example
+VAULT_WORKER_URL=https://suronai-vault.your-account.workers.dev
+VAULT_ACCESS_TOKEN=your_server_access_token
+VAULT_APP_ID=my-db-app
+DATABASE_URL=postgres://user:password@localhost:5432/mydb
+PORT=3000
+```
+
+</CodeGroup>
+
+## Setup Instructions
+
+```bash
+cp .env.example .env
+npm install
+npm start
+```
+
+## Key Pattern — Order Matters
+
+```javascript
+import { vault } from '@suronai/sdk'
+import pg        from 'pg'
+
+await vault.load()   // DATABASE_URL is now in process.env
+
+// Safe to use process.env.DATABASE_URL here
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL })
+```
+
+<Warning>
+  **Critical:** You must call `vault.load()` **before** creating the database pool. If you create the pool first, it will try to use an undefined `DATABASE_URL`.
+</Warning>
+
+## Adding Database URL
+
+Add your database connection string to the vault:
+
+```bash
+suron add DATABASE_URL postgres://user:password@host:5432/mydb
+```
+
+## Connection Verification
+
+The example includes immediate connection verification after `vault.load()`:
+
+```javascript
+try {
+  await pool.query('SELECT 1')
+  console.log('Database connected')
+} catch (err) {
+  console.error('Database connection failed:', err.message)
+  process.exit(1)
+}
+```
+
+<Tip>
+  Verify the database connection immediately after loading secrets. This ensures your app fails fast at startup if the connection string is invalid, rather than failing on the first request.
+</Tip>
+
+## API Endpoints
+
+This example provides a complete CRUD API:
+
+- `GET /users` - List all users (limit 50, ordered by creation date)
+- `GET /users/:id` - Get a single user by ID
+- `POST /users` - Create a new user (requires `name` and `email`)
+- `GET /health` - Health check with database connectivity status
+
+## Dependencies
+
+- `@suronai/sdk` ^1.0.1
+- `express` ^4.18.2
+- `pg` ^8.11.3
+
+## GitHub Source
+
+View the complete source code:
+
+[github.com/Cryptoistaken/Suron/tree/main/examples/04-database](https://github.com/Cryptoistaken/Suron/tree/main/examples/04-database)

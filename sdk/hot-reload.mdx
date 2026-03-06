@@ -1,0 +1,293 @@
+---
+title: "Hot Reload"
+description: "Automatic secret updates without process restarts"
+---
+
+## Overview
+
+Hot reload automatically updates secrets in `process.env` when you run `suron add` or `suron encrypt` — **without restarting your application**. No Telegram approval required.
+
+<Info>
+  Hot reload is enabled automatically after you call `vault.load()`. The SDK starts a heartbeat that checks for vault updates every 30 seconds.
+</Info>
+
+## How It Works
+
+<Steps>
+  <Step title="Heartbeat runs every 30s">
+    SDK sends current vault version to `/heartbeat` endpoint
+  </Step>
+  
+  <Step title="Worker detects update">
+    If vault version changed, worker responds with `shouldReload: true`
+  </Step>
+  
+  <Step title="SDK reloads in-place">
+    SDK calls internal `hotReload()` function to fetch and decrypt new secrets
+  </Step>
+  
+  <Step title="Secrets updated in process.env">
+    All `process.env` values are updated without restarting the process
+  </Step>
+  
+  <Step title="Heartbeat resumes">
+    Heartbeat restarts to continue monitoring for future updates
+  </Step>
+</Steps>
+
+## Heartbeat Implementation
+
+From `/home/daytona/workspace/source/SDK/src/heartbeat.js:13-47`:
+
+```javascript
+import { EventEmitter } from 'events'
+
+const HEARTBEAT_MS = 30000  // 30 seconds
+
+export const events = new EventEmitter()
+
+export function startHeartbeat(workerUrl, appId, token) {
+  const iv = setInterval(async () => {
+    try {
+      const knownVaultVersion = getKnownVaultVersion()
+
+      const { status, shouldReload, vaultVersion } = await post(
+        workerUrl, '/heartbeat',
+        { appId, knownVaultVersion },
+        token
+      )
+
+      if (status === 'denied') {
+        clearInterval(iv)
+        log.error('Access revoked by admin — shutting down')
+        events.emit('revoked', appId)
+        setImmediate(() => process.exit(1))
+        return
+      }
+
+      // Vault was updated — reload secrets in-place
+      if (shouldReload) {
+        clearInterval(iv)  // pause heartbeat during reload
+        setKnownVaultVersion(vaultVersion)
+        await hotReload(workerUrl, appId, token, vaultVersion)
+        startHeartbeat(workerUrl, appId, token)  // resume heartbeat
+      }
+
+    } catch { /* transient network blip — keep running */ }
+  }, HEARTBEAT_MS)
+
+  iv.unref()  // Don't prevent process exit
+}
+```
+
+## Hot Reload Function
+
+From `/home/daytona/workspace/source/SDK/src/vault.js:116-128`:
+
+```javascript
+export async function hotReload(workerUrl, appId, token, newVaultVersion) {
+  log.info('Secrets updated — reloading in-place')
+  try {
+    const loaded = await fetchAndDecrypt(workerUrl, appId, token)
+    _knownVaultVersion = newVaultVersion
+    await post(workerUrl, '/loaded', { appId }, token)
+    log.success(`${loaded} secrets hot-reloaded`)
+  } catch (e) {
+    log.error(`Hot-reload failed: ${e.message}`)
+  }
+}
+```
+
+<Note>
+  `hotReload()` is an internal function — you don't call it directly. It's invoked automatically by the heartbeat.
+</Note>
+
+## Using Secrets Correctly
+
+Because hot reload updates `process.env` in-place, you must read environment variables **at the point of use**, not at module load time.
+
+### ✅ Correct: Read at Request Time
+
+From `/home/daytona/workspace/source/examples/07-hot-reload/index.js:22-28`:
+
+```javascript
+import express from 'express'
+
+// ✅ GOOD — reads process.env at request time
+app.get('/api/data', async (req, res) => {
+  const response = await fetch('https://api.example.com/data', {
+    headers: { 'Authorization': `Bearer ${process.env.API_KEY}` }  // ← read here
+  })
+  res.json(await response.json())
+})
+
+// ✅ GOOD — feature flag check at request time
+app.get('/api/feature', (req, res) => {
+  const enabled = process.env.FEATURE_FLAG === 'true'  // ← read here
+  res.json({ feature: 'new-ui', enabled })
+})
+```
+
+### ❌ Incorrect: Captured at Module Load
+
+```javascript
+import express from 'express'
+
+// ❌ BAD — captured once at startup, won't reflect hot-reload updates
+const API_KEY = process.env.API_KEY
+
+app.get('/api/data', async (req, res) => {
+  // Uses stale API_KEY — won't get updates from hot reload
+  const response = await fetch('https://api.example.com/data', {
+    headers: { 'Authorization': `Bearer ${API_KEY}` }
+  })
+  res.json(await response.json())
+})
+```
+
+<Warning>
+  **Rule:** Always read `process.env.*` at the point of use, not at module load time.
+</Warning>
+
+## Listening for Reload Events
+
+The SDK does not currently emit a `reload` event, but you can listen for access revocation:
+
+```javascript
+import { vault } from '@suronai/sdk'
+
+await vault.load()
+
+// Listen for access revocation
+vault.events.on('revoked', (appId) => {
+  console.log(`Access revoked for ${appId} — shutting down gracefully`)
+  // Clean up resources before process exits
+  db.close()
+  server.close()
+})
+```
+
+The `revoked` event fires when:
+- Admin revokes access via Telegram
+- Heartbeat receives `status: 'denied'` response
+- Process will exit with code 1 one tick after event is emitted
+
+## Update Detection Logic
+
+The heartbeat tracks vault version to detect updates:
+
+```javascript
+// SDK sends current version it has loaded
+const { status, shouldReload, vaultVersion } = await post(
+  workerUrl, '/heartbeat',
+  { appId, knownVaultVersion },  // ← sends version we know about
+  token
+)
+
+if (shouldReload) {
+  // Worker detected newer version — trigger hot reload
+  await hotReload(workerUrl, appId, token, vaultVersion)
+}
+```
+
+Worker logic:
+1. Compare `knownVaultVersion` from SDK with current vault version in database
+2. If database version is newer, respond with `shouldReload: true`
+3. SDK fetches updated vault data and decrypts into `process.env`
+
+## Example: Express API with Hot Reload
+
+From `/home/daytona/workspace/source/examples/07-hot-reload/index.js`:
+
+```javascript
+import { vault } from '@suronai/sdk'
+import express from 'express'
+
+await vault.load()
+
+const app = express()
+const port = process.env.PORT || 3000
+
+app.use(express.json())
+
+// ✅ Always read process.env at request time
+app.get('/api/data', async (req, res) => {
+  const response = await fetch('https://api.example.com/data', {
+    headers: { 'Authorization': `Bearer ${process.env.API_KEY}` }
+  })
+  res.json(await response.json())
+})
+
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    featureFlag: process.env.FEATURE_FLAG,
+    apiKeySet: !!process.env.API_KEY,
+    appId: process.env.VAULT_APP_ID,
+  })
+})
+
+app.listen(port, () => {
+  console.log(`Server listening on port ${port}`)
+  console.log('Secrets will hot-reload automatically within 30s when you run: suron add/encrypt')
+})
+```
+
+## Heartbeat Behavior
+
+<ParamField path="Interval" type="number">
+  30 seconds (30000ms) — defined in `HEARTBEAT_MS` constant
+</ParamField>
+
+<ParamField path="Unreferenced" type="boolean">
+  `true` — heartbeat calls `iv.unref()` so it doesn't prevent process exit
+</ParamField>
+
+<ParamField path="Error Handling" type="string">
+  Network errors are caught and ignored — heartbeat continues running
+</ParamField>
+
+<ParamField path="Pause During Reload" type="boolean">
+  `true` — heartbeat is cleared during hot reload, then restarted after completion
+</ParamField>
+
+## Testing Hot Reload
+
+1. Start your application:
+   ```bash
+   node index.js
+   ```
+
+2. Add or update a secret:
+   ```bash
+   suron add NEW_API_KEY sk_new_value
+   ```
+
+3. Wait up to 30 seconds — SDK logs:
+   ```
+   ✓ Secrets updated — reloading in-place
+   ✓ 5 secrets hot-reloaded
+   ```
+
+4. New secret is available immediately:
+   ```javascript
+   console.log(process.env.NEW_API_KEY)  // sk_new_value
+   ```
+
+<Tip>
+  You can verify hot reload is working by checking the `/health` endpoint before and after running `suron add`.
+</Tip>
+
+## Related
+
+<CardGroup cols={2}>
+
+<Card title="vault.load()" icon="lock" href="/sdk/vault-load">
+  Initial secret loading with approval
+</Card>
+
+<Card title="vault.events" icon="bell" href="/sdk/api-reference#events">
+  Event emitter for lifecycle events
+</Card>
+
+</CardGroup>

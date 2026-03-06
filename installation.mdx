@@ -1,0 +1,497 @@
+---
+title: Installation
+description: Install @suronai/sdk and @suronai/cli packages
+---
+
+## Overview
+
+Suron Vault consists of two npm packages:
+
+- **`@suronai/sdk`** — Runtime secrets loader for your Node.js app
+- **`@suronai/cli`** — CLI tool for managing secrets on your development machine
+
+You'll install the SDK as a dependency in your application, and the CLI globally on your dev machine.
+
+## Prerequisites
+
+Before installing, ensure you have:
+
+<CardGroup cols={2}>
+  <Card title="Node.js 16+" icon="node-js">
+    Suron Vault requires Node.js version 16 or higher
+  </Card>
+  
+  <Card title="npm / yarn / pnpm" icon="box">
+    Any modern package manager works
+  </Card>
+</CardGroup>
+
+Verify your Node.js version:
+
+```bash
+node --version
+# Should output v16.x.x or higher
+```
+
+<Warning>
+Suron Vault uses ES modules (`type: "module"`). Ensure your project supports ESM or convert your app to use `import` instead of `require`.
+</Warning>
+
+## Installing the SDK
+
+Add `@suronai/sdk` to your application's dependencies:
+
+<CodeGroup>
+```bash npm
+npm install @suronai/sdk
+```
+
+```bash yarn
+yarn add @suronai/sdk
+```
+
+```bash pnpm
+pnpm add @suronai/sdk
+```
+</CodeGroup>
+
+### Package details
+
+- **Package name**: `@suronai/sdk`
+- **Current version**: `1.0.1`
+- **License**: MIT
+- **Dependencies**: `chalk@^5.3.0`, `dotenv@^16.4.5`
+
+### Verify installation
+
+```javascript
+import { vault } from '@suronai/sdk'
+
+console.log('Suron SDK loaded successfully')
+```
+
+If this runs without errors, the SDK is installed correctly.
+
+## Installing the CLI
+
+Install `@suronai/cli` globally so you can run `suron` commands from anywhere:
+
+<CodeGroup>
+```bash npm
+npm install -g @suronai/cli
+```
+
+```bash yarn
+yarn global add @suronai/cli
+```
+
+```bash pnpm
+pnpm add -g @suronai/cli
+```
+</CodeGroup>
+
+### Package details
+
+- **Package name**: `@suronai/cli`
+- **Current version**: `1.0.1`
+- **License**: MIT
+- **Binary command**: `suron`
+- **Dependencies**: `chalk@^5.3.0`, `dotenv@^16.4.5`
+
+### Verify installation
+
+```bash
+suron --version
+# Should output: 1.0.1
+```
+
+<Info>
+If `suron` is not found, ensure your global npm bin directory is in your `PATH`. Run `npm config get prefix` to find it.
+</Info>
+
+## Environment Variables
+
+After installation, your application needs three environment variables to connect to Suron Vault:
+
+### Required variables
+
+<ParamField path="VAULT_WORKER_URL" type="string" required>
+  The URL of your deployed Cloudflare Worker
+  
+  ```bash
+  VAULT_WORKER_URL=https://suronai-vault.your-account.workers.dev
+  ```
+</ParamField>
+
+<ParamField path="VAULT_ACCESS_TOKEN" type="string" required>
+  Server access token (not your CLI token)
+  
+  ```bash
+  VAULT_ACCESS_TOKEN=your_server_access_token
+  ```
+  
+  <Warning>
+  Use the **server token**, not the CLI token. The server token cannot access `/admin/*` routes.
+  </Warning>
+</ParamField>
+
+<ParamField path="VAULT_APP_ID" type="string" required>
+  The app name you used in `suron init --app my-app`
+  
+  ```bash
+  VAULT_APP_ID=my-app
+  ```
+</ParamField>
+
+### Optional variables
+
+<ParamField path="VAULT_PERMIT" type="string">
+  Permit token for trusted restarts (see [Trusted Restarts](/examples/trusted-restart))
+  
+  ```bash
+  VAULT_PERMIT=permit_abc123xyz789
+  ```
+  
+  <Info>
+  Only needed if you're implementing trusted restarts to skip Telegram approval on process restarts.
+  </Info>
+</ParamField>
+
+### Setting variables
+
+Create a `.env` file in your project root with **only** these three variables:
+
+```bash .env
+VAULT_WORKER_URL=https://suronai-vault.your-account.workers.dev
+VAULT_ACCESS_TOKEN=your_server_access_token
+VAULT_APP_ID=my-app
+```
+
+<Warning>
+Do **not** put your application secrets in this `.env` file. Those belong in the encrypted `.env.suron` file managed by `suron encrypt`.
+</Warning>
+
+The SDK automatically loads these variables using `dotenv` when you call `vault.load()`.
+
+### Platform-specific setup
+
+<AccordionGroup>
+  <Accordion title="Vercel">
+    1. Go to your project settings
+    2. Navigate to **Environment Variables**
+    3. Add all three variables:
+       - `VAULT_WORKER_URL`
+       - `VAULT_ACCESS_TOKEN`
+       - `VAULT_APP_ID`
+    4. Choose environments (Production, Preview, Development)
+    5. Save
+  </Accordion>
+
+  <Accordion title="Netlify">
+    1. Go to **Site settings** → **Environment variables**
+    2. Click **Add a variable**
+    3. Add all three variables
+    4. Choose scopes (Production, Deploy Previews, Branch deploys)
+    5. Save
+  </Accordion>
+
+  <Accordion title="Railway">
+    1. Select your service
+    2. Go to **Variables** tab
+    3. Click **+ New Variable**
+    4. Add all three variables
+    5. Redeploy if needed
+  </Accordion>
+
+  <Accordion title="Docker">
+    Add to your `Dockerfile`:
+    
+    ```dockerfile
+    ENV VAULT_WORKER_URL=https://suronai-vault.your-account.workers.dev
+    ENV VAULT_ACCESS_TOKEN=your_server_access_token
+    ENV VAULT_APP_ID=my-app
+    ```
+    
+    Or pass at runtime:
+    
+    ```bash
+    docker run \
+      -e VAULT_WORKER_URL=https://suronai-vault.your-account.workers.dev \
+      -e VAULT_ACCESS_TOKEN=your_server_access_token \
+      -e VAULT_APP_ID=my-app \
+      your-image
+    ```
+  </Accordion>
+
+  <Accordion title="PM2">
+    Use an ecosystem file:
+    
+    ```javascript ecosystem.config.js
+    module.exports = {
+      apps: [{
+        name: 'my-app',
+        script: './index.js',
+        env: {
+          NODE_ENV: 'production',
+          VAULT_WORKER_URL: 'https://suronai-vault.your-account.workers.dev',
+          VAULT_ACCESS_TOKEN: 'your_server_access_token',
+          VAULT_APP_ID: 'my-app',
+        }
+      }]
+    }
+    ```
+    
+    Then start with:
+    
+    ```bash
+    pm2 start ecosystem.config.js
+    ```
+  </Accordion>
+
+  <Accordion title="GitHub Actions (for CI/CD)">
+    Add secrets to your repository:
+    
+    1. Go to **Settings** → **Secrets and variables** → **Actions**
+    2. Add repository secrets:
+       - `VAULT_WORKER_URL`
+       - `VAULT_ACCESS_TOKEN`
+       - `VAULT_APP_ID`
+    
+    Use in workflow:
+    
+    ```yaml .github/workflows/deploy.yml
+    jobs:
+      deploy:
+        runs-on: ubuntu-latest
+        env:
+          VAULT_WORKER_URL: ${{ secrets.VAULT_WORKER_URL }}
+          VAULT_ACCESS_TOKEN: ${{ secrets.VAULT_ACCESS_TOKEN }}
+          VAULT_APP_ID: ${{ secrets.VAULT_APP_ID }}
+        steps:
+          - uses: actions/checkout@v3
+          - run: npm install
+          - run: npm start
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## CLI Authentication
+
+After installing the CLI globally, authenticate it with your Suron Worker:
+
+```bash
+suron login
+```
+
+You'll be prompted for:
+
+<Steps>
+  <Step title="Suron Worker URL">
+    Enter your deployed Cloudflare Worker URL:
+    
+    ```
+    ? Suron Worker URL: https://suronai-vault.your-account.workers.dev
+    ```
+  </Step>
+
+  <Step title="Username">
+    Enter your admin username (configured during Worker deployment):
+    
+    ```
+    ? Username: admin
+    ```
+  </Step>
+
+  <Step title="Password">
+    Enter your admin password:
+    
+    ```
+    ? Password: ********
+    ```
+  </Step>
+</Steps>
+
+The CLI saves your session to `~/.suron/auth.json` for future commands.
+
+<Info>
+The CLI token is separate from the server access token. The CLI token has admin privileges and should **never** be deployed with your app.
+</Info>
+
+### Logout
+
+To clear your CLI session:
+
+```bash
+suron logout
+```
+
+This deletes `~/.suron/auth.json`.
+
+## Project Setup
+
+Ensure your `package.json` has `"type": "module"` to use ES modules:
+
+```json package.json
+{
+  "name": "my-app",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@suronai/sdk": "^1.0.1"
+  }
+}
+```
+
+<Warning>
+If you're migrating from CommonJS (`require`), you'll need to convert your codebase to use `import` statements.
+</Warning>
+
+## .gitignore
+
+When you run `suron init`, the CLI automatically updates your `.gitignore`. If you're setting up manually, ensure these entries exist:
+
+```gitignore .gitignore
+# Suron Vault — never commit these
+.env
+.env.local
+.env.*.local
+.vault-permit
+
+# Suron Vault — SAFE to commit (encrypted)
+# .env.suron  ← commit this
+```
+
+<Info>
+`.env.suron` is encrypted and **safe to commit**. Only the raw `.env` files should be ignored.
+</Info>
+
+## Verification Checklist
+
+Before proceeding to the [Quickstart](/quickstart), verify:
+
+<Steps>
+  <Step title="SDK installed">
+    ```bash
+    npm list @suronai/sdk
+    # Should show: @suronai/sdk@1.0.1
+    ```
+  </Step>
+
+  <Step title="CLI installed and authenticated">
+    ```bash
+    suron --version
+    # Should output: 1.0.1
+    
+    suron list
+    # Should connect to your Worker (or prompt login)
+    ```
+  </Step>
+
+  <Step title="Environment variables set">
+    Confirm these are set in your environment or `.env` file:
+    - `VAULT_WORKER_URL`
+    - `VAULT_ACCESS_TOKEN`
+    - `VAULT_APP_ID`
+  </Step>
+
+  <Step title=".gitignore updated">
+    Ensure `.env`, `.env.local`, and `.vault-permit` are in `.gitignore`.
+  </Step>
+</Steps>
+
+<Check>
+All set! Continue to the [Quickstart](/quickstart) to encrypt your first secrets.
+</Check>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Command 'suron' not found">
+    The global npm bin directory may not be in your PATH.
+    
+    Find the directory:
+    ```bash
+    npm config get prefix
+    ```
+    
+    Add to your shell profile (`~/.bashrc`, `~/.zshrc`, etc.):
+    ```bash
+    export PATH="$PATH:$(npm config get prefix)/bin"
+    ```
+    
+    Reload your shell:
+    ```bash
+    source ~/.bashrc  # or ~/.zshrc
+    ```
+  </Accordion>
+
+  <Accordion title="ERR_REQUIRE_ESM error">
+    Suron Vault uses ES modules. Ensure your `package.json` has:
+    
+    ```json
+    {
+      "type": "module"
+    }
+    ```
+    
+    Convert `require()` to `import`:
+    
+    ```javascript
+    // Before (CommonJS)
+    const { vault } = require('@suronai/sdk')
+    
+    // After (ES modules)
+    import { vault } from '@suronai/sdk'
+    ```
+  </Accordion>
+
+  <Accordion title="Missing required env var: VAULT_WORKER_URL">
+    The SDK cannot find the required environment variables. Ensure:
+    
+    1. You have a `.env` file with all three variables
+    2. The `.env` file is in the same directory where you run `node`
+    3. Variables are exported if running outside of Node.js (e.g., in shell scripts)
+    
+    Alternatively, set them directly:
+    
+    ```bash
+    export VAULT_WORKER_URL=https://...
+    export VAULT_ACCESS_TOKEN=...
+    export VAULT_APP_ID=my-app
+    node index.js
+    ```
+  </Accordion>
+
+  <Accordion title="Authentication failed: Invalid username or password">
+    Double-check:
+    
+    1. Worker URL is correct (no trailing slash)
+    2. Username matches what you configured during Worker deployment
+    3. Password is correct (watch for copy-paste issues)
+    
+    If you've forgotten credentials, redeploy the Worker with new credentials or check your deployment logs.
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Follow the step-by-step guide to encrypt your first secrets
+  </Card>
+  
+  <Card title="CLI Reference" icon="terminal" href="/cli/commands">
+    Learn all available CLI commands
+  </Card>
+  
+  <Card title="SDK API" icon="code" href="/sdk/vault">
+    Explore the SDK API documentation
+  </Card>
+  
+  <Card title="Examples" icon="flask" href="/examples">
+    See working examples for Express, Fastify, and more
+  </Card>
+</CardGroup>

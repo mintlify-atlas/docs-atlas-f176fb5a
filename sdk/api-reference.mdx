@@ -1,0 +1,533 @@
+---
+title: "API Reference"
+description: "Complete API documentation for @suronai/sdk"
+---
+
+## Installation
+
+```bash
+npm install @suronai/sdk
+```
+
+## Import
+
+```javascript
+import { vault } from '@suronai/sdk'
+```
+
+The SDK exports a single `vault` object with all methods and properties.
+
+## vault.load()
+
+Load encrypted secrets with Telegram approval. This is the primary method for initializing Suron Vault in your application.
+
+### Signature
+
+```typescript
+vault.load(): Promise<void>
+```
+
+### Returns
+
+<ResponseField name="Promise<void>" type="Promise">
+  Resolves when secrets are successfully loaded into `process.env`. Rejects with an error if approval is denied, times out, or vault doesn't exist.
+</ResponseField>
+
+### Throws
+
+- `Error: Missing required env var: VAULT_WORKER_URL` — missing environment variable
+- `Error: Missing required env var: VAULT_ACCESS_TOKEN` — missing environment variable
+- `Error: VAULT_APP_ID is required — add it to your server .env` — missing environment variable
+- `Error: No vault found for "<appId>" — run: suron encrypt` — vault doesn't exist
+- `Error: Access denied by admin` — admin denied the request in Telegram
+- `Error: No response after 5 minutes — access denied by timeout` — no response within timeout
+
+### Behavior
+
+1. Checks for permit token in memory or `VAULT_PERMIT` env var
+2. If permit exists and valid, performs [trusted restart](/sdk/trusted-restart) (skips Telegram)
+3. If no permit or permit invalid, sends access request to admin via Telegram
+4. Polls for approval every 3 seconds (5 minute timeout)
+5. On approval, fetches vault data and key halves from worker
+6. Decrypts all secrets and injects into `process.env`
+7. Stores permit token in memory for future restarts
+8. Starts heartbeat to monitor for updates and revocations
+
+### Example
+
+```javascript
+import { vault } from '@suronai/sdk'
+
+try {
+  await vault.load()
+  console.log('Secrets loaded:', Object.keys(process.env).length)
+} catch (error) {
+  console.error('Failed to load vault:', error.message)
+  process.exit(1)
+}
+```
+
+### Source
+
+`/home/daytona/workspace/source/SDK/src/vault.js:48-114`
+
+---
+
+## vault.hotReload()
+
+<Warning>
+  **Internal method** — called automatically by heartbeat. Do not call directly.
+</Warning>
+
+Re-fetches and decrypts secrets when vault version changes. This method is invoked by the heartbeat when it detects a vault update.
+
+### Signature
+
+```typescript
+vault.hotReload(
+  workerUrl: string,
+  appId: string,
+  token: string,
+  newVaultVersion: number
+): Promise<void>
+```
+
+### Parameters
+
+<ParamField path="workerUrl" type="string" required>
+  URL of the vault worker (e.g., `https://your-worker.workers.dev`)
+</ParamField>
+
+<ParamField path="appId" type="string" required>
+  Application identifier for the vault
+</ParamField>
+
+<ParamField path="token" type="string" required>
+  Access token for authenticating with the worker
+</ParamField>
+
+<ParamField path="newVaultVersion" type="number" required>
+  New version number of the vault to load
+</ParamField>
+
+### Behavior
+
+1. Logs "Secrets updated — reloading in-place"
+2. Calls internal `fetchAndDecrypt()` to get new vault data
+3. Updates `_knownVaultVersion` to new version
+4. Notifies worker via `/loaded` endpoint
+5. Logs success with count of reloaded secrets
+6. On error, logs error message but does not throw
+
+### Source
+
+`/home/daytona/workspace/source/SDK/src/vault.js:116-128`
+
+---
+
+## vault.getPermitToken()
+
+Returns the current permit token from memory. Use this to persist the permit for [trusted restarts](/sdk/trusted-restart).
+
+### Signature
+
+```typescript
+vault.getPermitToken(): string | null
+```
+
+### Returns
+
+<ResponseField name="permitToken" type="string | null">
+  Current permit token if one exists in memory, or `null` if no permit is available. The permit is a JWT token valid for 24 hours.
+</ResponseField>
+
+### Example
+
+```javascript
+import { vault } from '@suronai/sdk'
+import { writeFileSync } from 'fs'
+
+// Load secrets with initial approval
+await vault.load()
+
+// Get and persist permit for next restart
+const permit = vault.getPermitToken()
+if (permit) {
+  writeFileSync('.vault-permit', permit)
+  console.log('Permit saved for trusted restart')
+}
+```
+
+### Source
+
+`/home/daytona/workspace/source/SDK/src/vault.js:130`
+
+---
+
+## vault.events
+
+EventEmitter instance for listening to vault lifecycle events.
+
+### Type
+
+```typescript
+vault.events: EventEmitter
+```
+
+### Events
+
+#### `revoked`
+
+Emitted when admin revokes access via Telegram. The process will exit with code 1 one tick after this event.
+
+**Callback signature:**
+
+```typescript
+(appId: string) => void
+```
+
+**Parameters:**
+
+<ParamField path="appId" type="string">
+  The application ID for which access was revoked
+</ParamField>
+
+**Example:**
+
+```javascript
+import { vault } from '@suronai/sdk'
+
+await vault.load()
+
+// Listen for access revocation
+vault.events.on('revoked', (appId) => {
+  console.log(`Access revoked for ${appId} — cleaning up...`)
+  
+  // Close database connections
+  db.close()
+  
+  // Close HTTP server
+  server.close()
+  
+  // Other cleanup...
+})
+
+// Process will exit after one tick
+```
+
+### Source
+
+`/home/daytona/workspace/source/SDK/src/heartbeat.js:11`
+
+---
+
+## Environment Variables
+
+These environment variables must be set before calling `vault.load()`.
+
+### Required
+
+<ParamField path="VAULT_WORKER_URL" type="string" required>
+  URL of your deployed Cloudflare Worker that serves as the vault backend.
+  
+  **Example:** `https://your-worker.workers.dev`
+</ParamField>
+
+<ParamField path="VAULT_ACCESS_TOKEN" type="string" required>
+  Access token for authenticating with the vault worker. Generated by the Suron CLI during initialization.
+  
+  **Format:** Random string (e.g., `a1b2c3d4e5f6...`)
+</ParamField>
+
+<ParamField path="VAULT_APP_ID" type="string" required>
+  Unique identifier for your application. Used to identify which vault to load from the worker.
+  
+  **Example:** `my-app`, `production-api`, `staging-web`
+</ParamField>
+
+### Optional
+
+<ParamField path="VAULT_PERMIT" type="string">
+  Permit token for [trusted restarts](/sdk/trusted-restart). If provided, `vault.load()` will attempt to skip Telegram approval.
+  
+  **Format:** JWT token (e.g., `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...`)
+  
+  **Valid for:** 24 hours (automatically refreshed by heartbeat)
+</ParamField>
+
+---
+
+## Type Definitions
+
+### VaultExports
+
+```typescript
+interface VaultExports {
+  load: () => Promise<void>
+  hotReload: (workerUrl: string, appId: string, token: string, newVaultVersion: number) => Promise<void>
+  getPermitToken: () => string | null
+  events: EventEmitter
+}
+```
+
+### HeartbeatResponse
+
+```typescript
+interface HeartbeatResponse {
+  status: 'approved' | 'denied'
+  shouldReload: boolean
+  vaultVersion: number
+}
+```
+
+### ResumeResponse
+
+```typescript
+interface ResumeResponse {
+  ok: boolean
+  reason?: 'expired' | 'revoked' | 'invalid'
+  vaultVersion?: number
+}
+```
+
+### StatusResponse
+
+```typescript
+interface StatusResponse {
+  status: 'pending' | 'approved' | 'denied'
+  permitToken?: string | null
+}
+```
+
+---
+
+## Internal Functions
+
+These functions are exported from SDK source files but are not exposed via the main `vault` object. They are documented here for completeness.
+
+### getKnownVaultVersion()
+
+```typescript
+getKnownVaultVersion(): number
+```
+
+Returns the vault version currently loaded in memory. Used internally by heartbeat to detect updates.
+
+**Source:** `/home/daytona/workspace/source/SDK/src/vault.js:131`
+
+### setKnownVaultVersion()
+
+```typescript
+setKnownVaultVersion(version: number): void
+```
+
+Sets the known vault version. Called by hot reload after loading new secrets.
+
+**Source:** `/home/daytona/workspace/source/SDK/src/vault.js:132`
+
+### startHeartbeat()
+
+```typescript
+startHeartbeat(workerUrl: string, appId: string, token: string): void
+```
+
+Starts the 30-second heartbeat interval that monitors for vault updates and access revocations. Called automatically by `vault.load()`.
+
+**Source:** `/home/daytona/workspace/source/SDK/src/heartbeat.js:13-47`
+
+---
+
+## Constants
+
+### HEARTBEAT_MS
+
+```typescript
+const HEARTBEAT_MS = 30000  // 30 seconds
+```
+
+Interval between heartbeat pings to the vault worker.
+
+**Source:** `/home/daytona/workspace/source/SDK/src/heartbeat.js:7`
+
+### POLL_MS
+
+```typescript
+const POLL_MS = 3000  // 3 seconds
+```
+
+Interval between approval status polls during initial load.
+
+**Source:** `/home/daytona/workspace/source/SDK/src/poller.js:5`
+
+### TIMEOUT_MS
+
+```typescript
+const TIMEOUT_MS = 5 * 60 * 1000  // 5 minutes
+```
+
+Maximum time to wait for Telegram approval before timing out.
+
+**Source:** `/home/daytona/workspace/source/SDK/src/poller.js:6`
+
+---
+
+## Worker Endpoints
+
+These are the Cloudflare Worker endpoints that the SDK communicates with. They are documented here for reference.
+
+### POST /request
+
+Sends access request and triggers Telegram notification.
+
+**Request:**
+```typescript
+{
+  appId: string
+  hostname: string  // Server hostname from os.hostname()
+}
+```
+
+**Response:**
+```typescript
+{}
+```
+
+### POST /status
+
+Polls for approval status during initial load.
+
+**Request:**
+```typescript
+{
+  appId: string
+}
+```
+
+**Response:**
+```typescript
+{
+  status: 'pending' | 'approved' | 'denied'
+  permitToken?: string | null  // Only present when approved
+}
+```
+
+### POST /resume
+
+Attempts trusted restart with permit token.
+
+**Request:**
+```typescript
+{
+  appId: string
+  permitToken: string
+  hostname: string
+  knownVaultVersion: number
+}
+```
+
+**Response:**
+```typescript
+{
+  ok: boolean
+  reason?: 'expired' | 'revoked' | 'invalid'
+  vaultVersion?: number
+}
+```
+
+### POST /fetch-vault
+
+Fetches encrypted vault data.
+
+**Request:**
+```typescript
+{
+  appId: string
+}
+```
+
+**Response:**
+```typescript
+{
+  vaultData: string  // Encrypted vault file contents
+}
+```
+
+### POST /keys
+
+Fetches key halves for decryption.
+
+**Request:**
+```typescript
+{
+  appId: string
+}
+```
+
+**Response:**
+```typescript
+{
+  convexHalf: string  // First half of master key
+  cfHalf: string      // Second half of master key
+}
+```
+
+### POST /loaded
+
+Notifies worker that secrets were successfully loaded.
+
+**Request:**
+```typescript
+{
+  appId: string
+}
+```
+
+**Response:**
+```typescript
+{}
+```
+
+### POST /heartbeat
+
+Heartbeat ping to check for updates and revocations.
+
+**Request:**
+```typescript
+{
+  appId: string
+  knownVaultVersion: number
+}
+```
+
+**Response:**
+```typescript
+{
+  status: 'approved' | 'denied'
+  shouldReload: boolean
+  vaultVersion: number
+}
+```
+
+---
+
+## See Also
+
+<CardGroup cols={2}>
+
+<Card title="vault.load()" icon="lock" href="/sdk/vault-load">
+  Detailed guide to loading secrets with approval
+</Card>
+
+<Card title="Hot Reload" icon="arrows-rotate" href="/sdk/hot-reload">
+  Automatic secret updates without restarts
+</Card>
+
+<Card title="Trusted Restart" icon="shield-check" href="/sdk/trusted-restart">
+  Skip approval using permit tokens
+</Card>
+
+<Card title="SDK Overview" icon="book" href="/sdk/overview">
+  Introduction and basic usage
+</Card>
+
+</CardGroup>

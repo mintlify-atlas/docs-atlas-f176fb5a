@@ -1,0 +1,396 @@
+---
+title: "Trusted Restart"
+description: "Skip Telegram approval for 24 hours using permit tokens"
+---
+
+## Overview
+
+Trusted restart allows your application to reload secrets **without Telegram approval** for up to 24 hours after initial approval. This is essential for:
+
+- **Deployments** — new instances start without manual approval
+- **Auto-scaling** — scale up without waiting for admin
+- **Process restarts** — crash recovery without downtime
+- **Development** — faster iteration with nodemon/hot reload
+
+<Info>
+  Permit tokens are valid for 24 hours and automatically refresh on each heartbeat while the app is running.
+</Info>
+
+## How It Works
+
+<Steps>
+  <Step title="Initial approval">
+    Call `vault.load()` — admin approves via Telegram, SDK receives permit token
+  </Step>
+  
+  <Step title="Store permit token">
+    SDK stores permit in memory (`_permitToken` variable) and returns it via `vault.getPermitToken()`
+  </Step>
+  
+  <Step title="Persist permit (optional)">
+    Save permit to disk or environment variable for next restart
+  </Step>
+  
+  <Step title="Next restart">
+    Set `VAULT_PERMIT` env var before calling `vault.load()`
+  </Step>
+  
+  <Step title="Trusted restart">
+    SDK finds permit, calls `/resume` endpoint, skips Telegram approval
+  </Step>
+</Steps>
+
+## Permit Token Behavior
+
+From `/home/daytona/workspace/source/SDK/src/vault.js:12-17`:
+
+```javascript
+// In-memory permit token — never written to disk by SDK.
+// Survives process restarts only if the same process re-calls vault.load().
+// Intentionally module-scoped so it persists across hot-reloads within one process.
+// Can be seeded from VAULT_PERMIT env var to support trusted restarts across process exits
+// (e.g. set by example 06-trusted-restart before calling vault.load()).
+let _permitToken = process.env.VAULT_PERMIT ?? null
+```
+
+<Warning>
+  The SDK **never writes permit tokens to disk**. You must implement your own persistence strategy.
+</Warning>
+
+## Getting the Permit Token
+
+### Function Signature
+
+```javascript
+function getPermitToken(): string | null
+```
+
+Returns the current permit token from memory, or `null` if no permit exists.
+
+### Usage
+
+```javascript
+import { vault } from '@suronai/sdk'
+
+// Load secrets with initial approval
+await vault.load()
+
+// Get permit token for persistence
+const permit = vault.getPermitToken()
+console.log('Permit:', permit)  // "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+## Persistence Strategies
+
+### Strategy 1: File Persistence (Development)
+
+Best for local development with process restarts (e.g., nodemon).
+
+From `/home/daytona/workspace/source/examples/06-trusted-restart/index.js`:
+
+```javascript
+import { vault } from '@suronai/sdk'
+import { writeFileSync, readFileSync, existsSync } from 'fs'
+
+const PERMIT_FILE = '.vault-permit'
+
+function loadStoredPermit() {
+  if (existsSync(PERMIT_FILE)) {
+    try {
+      return readFileSync(PERMIT_FILE, 'utf8').trim()
+    } catch { /* ignore */ }
+  }
+  // Also accept permit from environment variable
+  return process.env.VAULT_PERMIT ?? null
+}
+
+function savePermit(token) {
+  if (!token) return
+  writeFileSync(PERMIT_FILE, token)
+  // Also set in process.env so child processes could inherit it
+  process.env.VAULT_PERMIT = token
+}
+
+// --- Startup ---
+
+// Inject stored permit before vault.load()
+const storedPermit = loadStoredPermit()
+if (storedPermit) {
+  process.env.VAULT_PERMIT = storedPermit
+  console.log('Permit found — attempting trusted restart')
+} else {
+  console.log('No permit — will request Telegram approval')
+}
+
+// vault.load() handles everything:
+// - If permit is valid → skips Telegram, resumes silently
+// - If permit expired/revoked → falls back to full Telegram approval automatically
+await vault.load()
+
+// Save the permit for next restart
+savePermit(vault.getPermitToken())
+```
+
+<Warning>
+  **Add `.vault-permit` to `.gitignore`** — never commit permit tokens to version control.
+</Warning>
+
+### Strategy 2: Environment Variable (Production)
+
+Best for cloud deployments (Railway, Render, Fly.io, etc.).
+
+```javascript
+import { vault } from '@suronai/sdk'
+
+// On first deploy, run with VAULT_PERMIT unset:
+// 1. Admin approves via Telegram
+// 2. Log the permit token
+// 3. Add it to platform environment variables
+// 4. Redeploy — subsequent deploys skip approval
+
+await vault.load()
+
+const permit = vault.getPermitToken()
+if (permit) {
+  console.log('🔑 Add this to your platform env vars:')
+  console.log('VAULT_PERMIT=' + permit)
+}
+```
+
+**Deployment workflow:**
+
+1. First deploy without `VAULT_PERMIT` → approve via Telegram
+2. Copy permit from logs
+3. Add `VAULT_PERMIT=<token>` to platform environment variables
+4. All future deploys skip Telegram approval
+
+### Strategy 3: Secrets Manager (Enterprise)
+
+Best for multi-region, high-availability production.
+
+```javascript
+import { vault } from '@suronai/sdk'
+import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager'
+
+const client = new SecretsManagerClient({ region: 'us-east-1' })
+
+async function loadPermitFromSecretsManager() {
+  try {
+    const response = await client.send(new GetSecretValueCommand({
+      SecretId: 'suron/vault-permit'
+    }))
+    return response.SecretString
+  } catch {
+    return null
+  }
+}
+
+async function savePermitToSecretsManager(token) {
+  if (!token) return
+  await client.send(new PutSecretValueCommand({
+    SecretId: 'suron/vault-permit',
+    SecretString: token
+  }))
+}
+
+// Load permit from Secrets Manager
+const storedPermit = await loadPermitFromSecretsManager()
+if (storedPermit) {
+  process.env.VAULT_PERMIT = storedPermit
+}
+
+await vault.load()
+
+// Save permit back to Secrets Manager
+await savePermitToSecretsManager(vault.getPermitToken())
+```
+
+## Trusted Restart Flow
+
+From `/home/daytona/workspace/source/SDK/src/vault.js:59-85`:
+
+```javascript
+if (_permitToken) {
+  log.info('Permit found — attempting trusted restart')
+
+  const resume = await post(workerUrl, '/resume', {
+    appId,
+    permitToken:       _permitToken,
+    hostname:          host,
+    knownVaultVersion: _knownVaultVersion,
+  }, token)
+
+  if (resume.ok) {
+    // Permit accepted — skip Telegram approval
+    log.success('Trusted restart approved — reloading secrets')
+    _knownVaultVersion = resume.vaultVersion ?? _knownVaultVersion
+
+    const loaded = await fetchAndDecrypt(workerUrl, appId, token)
+    await post(workerUrl, '/loaded', { appId }, token)
+    log.success(`${loaded} secrets reloaded`)
+
+    startHeartbeat(workerUrl, appId, token)
+    return  // ← Exit early, no polling needed
+  }
+
+  // Permit rejected (expired or revoked) — fall through to full approval
+  log.warning(`Permit ${resume.reason ?? 'invalid'} — requesting fresh approval`)
+  _permitToken = null
+}
+
+// --- Full approval flow (if no permit or permit invalid) ---
+```
+
+## Permit Expiration
+
+Permits expire after **24 hours of inactivity**. They are refreshed on every heartbeat (every 30 seconds) while your app is running.
+
+**Scenarios:**
+
+| Scenario | Permit Valid? | Behavior |
+|----------|--------------|----------|
+| App running for 10 days | ✅ Yes | Heartbeat refreshes permit every 30s |
+| App stopped for 23 hours | ✅ Yes | Trusted restart works on next start |
+| App stopped for 25 hours | ❌ No | Full Telegram approval required |
+| Permit revoked by admin | ❌ No | Full Telegram approval required |
+
+<Info>
+  As long as your app is running, the permit stays valid indefinitely via automatic heartbeat refresh.
+</Info>
+
+## Permit Rejection Reasons
+
+When `/resume` endpoint rejects a permit, it returns a reason:
+
+```javascript
+const resume = await post(workerUrl, '/resume', {
+  appId,
+  permitToken: _permitToken,
+  hostname: host,
+  knownVaultVersion: _knownVaultVersion,
+}, token)
+
+if (!resume.ok) {
+  // resume.reason contains:
+  // - 'expired' — permit older than 24h
+  // - 'revoked' — admin revoked access
+  // - 'invalid' — permit signature invalid or not found
+  console.log(`Permit ${resume.reason} — requesting fresh approval`)
+}
+```
+
+The SDK logs the reason and automatically falls through to full Telegram approval.
+
+## Complete Example
+
+From `/home/daytona/workspace/source/examples/06-trusted-restart/index.js:1-66`:
+
+```javascript
+import { vault } from '@suronai/sdk'
+import { writeFileSync, readFileSync, existsSync } from 'fs'
+import express from 'express'
+
+// --- Permit persistence helpers ---
+
+const PERMIT_FILE = '.vault-permit'
+
+function loadStoredPermit() {
+  if (existsSync(PERMIT_FILE)) {
+    try { return readFileSync(PERMIT_FILE, 'utf8').trim() } catch { /* ignore */ }
+  }
+  return process.env.VAULT_PERMIT ?? null
+}
+
+function savePermit(token) {
+  if (!token) return
+  writeFileSync(PERMIT_FILE, token)
+  process.env.VAULT_PERMIT = token
+}
+
+// --- Startup ---
+
+const storedPermit = loadStoredPermit()
+if (storedPermit) {
+  process.env.VAULT_PERMIT = storedPermit
+  console.log('Permit found — attempting trusted restart (no Telegram approval needed)')
+} else {
+  console.log('No permit — will request Telegram approval')
+}
+
+await vault.load()
+
+// Save the permit token for the next restart
+savePermit(vault.getPermitToken())
+
+// --- App ---
+
+const app = express()
+const port = process.env.PORT || 3000
+
+app.use(express.json())
+
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    secrets: 'loaded',
+    permit: existsSync(PERMIT_FILE) ? 'stored' : 'none',
+  })
+})
+
+app.listen(port, () => {
+  console.log(`Server listening on port ${port}`)
+})
+```
+
+## Security Considerations
+
+<Warning>
+  **Never commit permit tokens to git.** Add your permit storage file to `.gitignore`.
+</Warning>
+
+```bash
+# .gitignore
+.vault-permit
+.env
+```
+
+**Best practices:**
+
+1. **Development:** Use file persistence (`.vault-permit`), add to `.gitignore`
+2. **Production:** Use platform environment variables or secrets manager
+3. **Never log permits** in production (only in initial setup)
+4. **Rotate permits** by revoking access and re-approving
+
+## Debugging
+
+The SDK logs permit status during startup:
+
+```bash
+# With valid permit
+suron › Permit found — attempting trusted restart
+suron › Trusted restart approved — reloading secrets
+suron › 5 secrets reloaded
+
+# With expired permit
+suron › Permit found — attempting trusted restart
+suron › Permit expired — requesting fresh approval
+suron › Waiting for admin approval...
+
+# Without permit
+suron › Suron starting — my-app
+suron › Waiting for admin approval...
+```
+
+## Related
+
+<CardGroup cols={2}>
+
+<Card title="vault.load()" icon="lock" href="/sdk/vault-load">
+  Initial loading and approval flow
+</Card>
+
+<Card title="vault.getPermitToken()" icon="key" href="/sdk/api-reference#getpermittoken">
+  API reference for permit token retrieval
+</Card>
+
+</CardGroup>

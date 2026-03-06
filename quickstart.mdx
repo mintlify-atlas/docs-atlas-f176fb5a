@@ -1,80 +1,430 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Get started with Suron Vault in 5 minutes
 ---
 
-## Get started in three steps
+## Overview
 
-Get your documentation site running locally and make your first customization.
-
-### Step 1: Set up your local environment
-
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+This guide will walk you through setting up Suron Vault for your Node.js application. You'll encrypt secrets, add the SDK to your app, and deploy with environment variables.
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+Before starting, make sure you have [Node.js 16+](/installation#prerequisites) installed and have deployed the Suron Vault Worker and Convex backend.
 </Note>
+
+## Installation
+
+Install both the SDK (for your app) and CLI (for managing secrets):
+
+<CodeGroup>
+```bash npm
+npm install @suronai/sdk
+npm install -g @suronai/cli
+```
+
+```bash yarn
+yarn add @suronai/sdk
+yarn global add @suronai/cli
+```
+
+```bash pnpm
+pnpm add @suronai/sdk
+pnpm add -g @suronai/cli
+```
+</CodeGroup>
+
+<Info>
+The SDK goes in your app's dependencies, while the CLI is installed globally on your development machine.
+</Info>
+
+## Step-by-Step Setup
+
+<Steps>
+  <Step title="Log in to Suron CLI">
+    Authenticate the CLI with your Suron Worker:
+
+    ```bash
+    suron login
+    ```
+
+    You'll be prompted for:
+    - **Suron Worker URL**: `https://suronai-vault.your-account.workers.dev`
+    - **Username**: Your admin username
+    - **Password**: Your admin password
+
+    The session is saved to `~/.suron/auth.json` for future commands.
+
+    <CodeGroup>
+    ```text Output
+    ?
+    ? Suron Worker URL: https://suronai-vault.cryptoistaken.workers.dev
+    ? Username: admin
+    ? Password: ********
+
+    ℹ Authenticating...
+
+    ✓ Logged in successfully
+      Session saved to ~/.suron/auth.json
+    ```
+    </CodeGroup>
+  </Step>
+
+  <Step title="Initialize your app">
+    Generate encryption keys and create the vault file:
+
+    ```bash
+    suron init --app my-app
+    ```
+
+    This command:
+    - Generates a 256-bit AES master key
+    - Splits it into two halves (Convex + Cloudflare KV)
+    - Stores both halves remotely
+    - Creates a stub `.env.suron` file
+    - Updates `.gitignore` to exclude `.env` files
+
+    <CodeGroup>
+    ```text Output
+    ℹ Initializing my-app
+
+    ✓ my-app initialized
+      Master key stored remotely — no local key files
+      .env.suron created — run: suron encrypt
+    ```
+    </CodeGroup>
+
+    <Warning>
+    The master key is **never** stored locally. Only the split halves exist on Convex and Cloudflare KV.
+    </Warning>
+  </Step>
+
+  <Step title="Encrypt your secrets">
+    Create a `.env` file with your secrets:
+
+    ```bash .env
+    DATABASE_URL=postgresql://user:pass@localhost:5432/db
+    API_KEY=sk_live_abc123xyz789
+    STRIPE_SECRET=sk_test_def456uvw012
+    FEATURE_FLAGS=true
+    ```
+
+    Then encrypt it:
+
+    ```bash
+    suron encrypt
+    ```
+
+    This:
+    - Reads your `.env` file
+    - Encrypts each value with AES-256-GCM
+    - Writes encrypted values to `.env.suron`
+    - Automatically pushes to the Cloudflare Worker
+
+    <CodeGroup>
+    ```text Output
+    ℹ Encrypting secrets for my-app
+    ℹ Pushing to Suron...
+
+    ✓ 4 secrets encrypted and pushed
+      App: my-app
+      Commit .env.suron — add .env to .gitignore
+    ```
+    </CodeGroup>
+
+    Your `.env.suron` now looks like:
+
+    ```bash .env.suron
+    # Encrypted with @suronai/cli
+    VAULT_APP=my-app
+    DATABASE_URL=enc:sv1:aGVsbG8gd29ybGQgdGhpcyBpcyBhIHNhbXBsZQ==
+    API_KEY=enc:sv1:c2VjcmV0a2V5IGVuY3J5cHRlZCBkYXRh
+    STRIPE_SECRET=enc:sv1:ZW5jcnlwdGVkIHN0cmlwZSBrZXk=
+    FEATURE_FLAGS=enc:sv1:dHJ1ZSBlbmNyeXB0ZWQ=
+    ```
+
+    <Info>
+    Commit `.env.suron` to git — it's encrypted and safe. Add `.env` to your `.gitignore`.
+    </Info>
+  </Step>
+
+  <Step title="Add SDK to your app">
+    Add one line at the very top of your application entry point:
+
+    ```javascript index.js
+    import { vault } from '@suronai/sdk'
+
+    // vault.load() must be the first thing your app does.
+    // It blocks until you tap Approve on Telegram.
+    await vault.load()
+
+    // From here, all secrets are decrypted in process.env
+    console.log('App name:', process.env.APP_NAME)
+    console.log('API key loaded:', process.env.API_KEY ? 'yes' : 'no')
+    console.log('Database URL loaded:', process.env.DATABASE_URL ? 'yes' : 'no')
+
+    console.log('All secrets loaded — app running.')
+    ```
+
+    <Note>
+    `vault.load()` must run **before** you initialize frameworks like Express, Fastify, or database clients that depend on secrets.
+    </Note>
+
+    ### Example: Express API
+
+    Load secrets before creating the Express app:
+
+    ```javascript server.js
+    import { vault } from '@suronai/sdk'
+    import express from 'express'
+
+    // Load FIRST — server doesn't start until secrets are ready
+    await vault.load()
+
+    const app = express()
+    const port = process.env.PORT || 3000
+
+    app.use(express.json())
+
+    app.get('/health', (req, res) => {
+      res.json({
+        status: 'ok',
+        app: process.env.VAULT_APP_ID,
+        secrets: 'loaded',
+      })
+    })
+
+    // Use secrets in request handlers
+    app.post('/api/send', async (req, res) => {
+      const { message } = req.body
+      
+      // process.env.API_KEY was decrypted by vault.load()
+      const response = await fetch('https://api.example.com/send', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${process.env.API_KEY}`,
+        },
+        body: JSON.stringify({ message }),
+      })
+
+      res.json({ ok: response.ok, status: response.status })
+    })
+
+    app.listen(port, () => {
+      console.log(`Server listening on port ${port}`)
+    })
+    ```
+  </Step>
+
+  <Step title="Set environment variables">
+    On your server (production, staging, etc.), set these **3 environment variables**:
+
+    ```bash .env
+    VAULT_WORKER_URL=https://suronai-vault.your-account.workers.dev
+    VAULT_ACCESS_TOKEN=your_server_access_token
+    VAULT_APP_ID=my-app
+    ```
+
+    <AccordionGroup>
+      <Accordion title="Where do I get these values?">
+        - **`VAULT_WORKER_URL`**: Your deployed Cloudflare Worker URL
+        - **`VAULT_ACCESS_TOKEN`**: Generated when you deploy the Worker (server token, not CLI token)
+        - **`VAULT_APP_ID`**: The app name you used in `suron init --app my-app`
+      </Accordion>
+
+      <Accordion title="Platform-specific instructions">
+        **Vercel / Netlify / Railway**
+        
+        Add these in your platform's environment variables UI.
+
+        **Docker**
+        
+        ```dockerfile
+        ENV VAULT_WORKER_URL=https://suronai-vault.your-account.workers.dev
+        ENV VAULT_ACCESS_TOKEN=your_server_access_token
+        ENV VAULT_APP_ID=my-app
+        ```
+
+        **PM2 Ecosystem**
+        
+        ```javascript ecosystem.config.js
+        module.exports = {
+          apps: [{
+            name: 'my-app',
+            script: './index.js',
+            env: {
+              VAULT_WORKER_URL: 'https://suronai-vault.your-account.workers.dev',
+              VAULT_ACCESS_TOKEN: 'your_server_access_token',
+              VAULT_APP_ID: 'my-app',
+            }
+          }]
+        }
+        ```
+      </Accordion>
+    </AccordionGroup>
+
+    <Warning>
+    Use the **server access token**, not your CLI token. The server token cannot access `/admin/*` routes.
+    </Warning>
+  </Step>
+
+  <Step title="Deploy and approve">
+    Deploy your application. When it starts:
+
+    1. `vault.load()` sends a Telegram notification
+    2. You receive a message like:
+
+    ```text
+    🔐 Access Request
+    
+    App: my-app
+    Host: ip-172-31-45-123.ec2.internal
+    Time: 2026-03-06 14:23:45 UTC
+    
+    [Approve] [Deny]
+    ```
+
+    3. Tap **Approve**
+    4. Your app decrypts secrets into `process.env` and continues
+
+    <CodeGroup>
+    ```text App logs
+    ℹ Suron starting — my-app
+    ⏳ Waiting for approval on Telegram...
+    ✓ Approved
+    ✓ 4 secrets loaded
+    Server listening on port 3000
+    ```
+    </CodeGroup>
+  </Step>
+</Steps>
+
+## Managing Secrets
+
+After initial setup, use these commands to manage secrets:
+
+### Add or update a secret
+
+```bash
+suron add API_KEY sk_live_new_key_here
+```
+
+Automatically encrypts and pushes to the Worker. Running apps hot-reload within 30s.
+
+### Remove a secret
+
+```bash
+suron remove OLD_KEY
+```
+
+### List all secret keys (values not shown)
+
+```bash
+suron list
+```
+
+<CodeGroup>
+```text Output
+ℹ Secrets in my-app:
+  - DATABASE_URL
+  - API_KEY
+  - STRIPE_SECRET
+  - FEATURE_FLAGS
+```
+</CodeGroup>
+
+### Decrypt a single value (for debugging)
+
+```bash
+suron decrypt API_KEY
+```
+
+<Warning>
+This prints the decrypted value to your terminal. Use carefully.
+</Warning>
+
+### Rotate the master key
+
+Generate a new master key and re-encrypt all secrets:
+
+```bash
+suron rotate
+```
+
+All permit tokens are revoked — next app start requires fresh Telegram approval.
+
+## Trusted Restarts (Optional)
+
+By default, every process restart requires Telegram approval. For production deployments, you can enable **trusted restarts**:
+
+After the first approval, a permit token (valid 24h) is issued. Persist it to skip Telegram on restarts:
+
+```javascript index.js
+import { vault } from '@suronai/sdk'
+import { writeFileSync, readFileSync, existsSync } from 'fs'
+
+const PERMIT_FILE = '.vault-permit'
+
+// Load stored permit before vault.load()
+if (existsSync(PERMIT_FILE)) {
+  process.env.VAULT_PERMIT = readFileSync(PERMIT_FILE, 'utf8').trim()
+}
+
+await vault.load()  // uses permit if valid, falls back to Telegram if not
+
+// Save permit for next restart
+writeFileSync(PERMIT_FILE, vault.getPermitToken() ?? '')
+```
+
+<Warning>
+Add `.vault-permit` to `.gitignore` — it's a secret token that grants 24h access.
+</Warning>
+
+See the [trusted restart example](https://github.com/Cryptoistaken/Suron/tree/main/examples/06-trusted-restart) for a complete implementation.
+
+## Hot-Reload (Automatic)
+
+When you update secrets with `suron add` or `suron encrypt`, running apps automatically reload them within **30 seconds** — no restart, no Telegram approval, no downtime.
+
+### Critical rule: Read `process.env` at use time
+
+```javascript
+// ❌ BAD — captured at startup, never updates
+const API_KEY = process.env.API_KEY
+
+app.get('/api/data', async (req, res) => {
+  // Uses old value even after hot-reload
+  fetch('...', { headers: { Authorization: `Bearer ${API_KEY}` } })
+})
+
+// ✅ GOOD — read at request time, always latest
+app.get('/api/data', async (req, res) => {
+  // Gets new value after hot-reload
+  fetch('...', { headers: { Authorization: `Bearer ${process.env.API_KEY}` } })
+})
+```
+
+<Info>
+Hot-reload updates `process.env` in-place. Variables captured at module load time won't reflect updates.
+</Info>
+
+See the [hot-reload example](https://github.com/Cryptoistaken/Suron/tree/main/examples/07-hot-reload) for best practices.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="CLI Commands" icon="terminal" href="/cli/commands">
+    Complete reference for all CLI commands
+  </Card>
+  
+  <Card title="SDK API" icon="code" href="/sdk/vault">
+    Learn about vault.load(), hotReload(), and events
+  </Card>
+  
+  <Card title="Examples" icon="flask" href="/examples">
+    See full working examples for Express, Fastify, databases, and more
+  </Card>
+  
+  <Card title="Security" icon="shield" href="/security">
+    Deep dive into the split-key security model
+  </Card>
+</CardGroup>

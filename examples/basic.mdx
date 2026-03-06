@@ -1,0 +1,89 @@
+---
+title: Basic Integration
+description: The simplest possible Suron Vault integration
+---
+
+The simplest possible usage. One line added to any Node.js script.
+
+## Complete Example
+
+<CodeGroup>
+
+```javascript index.js
+import { vault } from '@suronai/sdk'
+
+// vault.load() must be the very first thing your app does.
+// It blocks until you tap Approve on Telegram.
+// All secrets are then available in process.env for the rest of the process.
+await vault.load()
+
+// From here, your secrets are decrypted in RAM — use them normally.
+console.log('App name:', process.env.APP_NAME)
+console.log('API key loaded:', process.env.API_KEY ? 'yes' : 'no')
+console.log('Database URL loaded:', process.env.DATABASE_URL ? 'yes' : 'no')
+
+console.log('All secrets loaded — app running.')
+```
+
+```json package.json
+{
+  "name": "suron-example-basic",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@suronai/sdk": "^1.0.1"
+  }
+}
+```
+
+```env .env.example
+VAULT_WORKER_URL=https://suronai-vault.your-account.workers.dev
+VAULT_ACCESS_TOKEN=your_server_access_token
+VAULT_APP_ID=my-app
+```
+
+</CodeGroup>
+
+## Setup Instructions
+
+```bash
+cp .env.example .env
+# fill in your VAULT_WORKER_URL, VAULT_ACCESS_TOKEN, VAULT_APP_ID
+
+npm install
+npm start
+```
+
+## What Happens
+
+1. `vault.load()` runs — your app pauses and sends a Telegram notification
+2. You tap **Approve** on Telegram
+3. Secrets are decrypted into `process.env`
+4. Your app continues from the line after `vault.load()`
+
+## The One Line
+
+```javascript
+import { vault } from '@suronai/sdk'
+
+await vault.load()  // ← this is all you need
+
+console.log(process.env.API_KEY)  // decrypted, in RAM only
+```
+
+<Note>
+  `vault.load()` must be the **very first** thing your app does, before any database connections, server initialization, or other setup.
+</Note>
+
+## Dependencies
+
+- `@suronai/sdk` ^1.0.1
+
+## GitHub Source
+
+View the complete source code:
+
+[github.com/Cryptoistaken/Suron/tree/main/examples/01-basic](https://github.com/Cryptoistaken/Suron/tree/main/examples/01-basic)

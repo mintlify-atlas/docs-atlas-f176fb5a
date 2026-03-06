@@ -1,0 +1,324 @@
+---
+title: Events
+description: Event system for monitoring vault lifecycle and access revocation
+---
+
+The Suron SDK emits events to notify your application of important vault lifecycle changes. This allows you to perform cleanup operations before shutdown.
+
+## Import
+
+```javascript
+import { vault } from '@suronai/sdk'
+
+const { events } = vault
+```
+
+## Event Emitter
+
+The `vault.events` object is a Node.js `EventEmitter` that emits lifecycle events.
+
+### Type
+
+```javascript
+import { EventEmitter } from 'events'
+
+export const events = new EventEmitter()
+```
+
+#### Source Reference
+
+See SDK/src/heartbeat.js:11
+
+---
+
+## Events
+
+### revoked
+
+Emitted when admin revokes access to the vault. Your application should perform cleanup and prepare for shutdown.
+
+<ParamField path="appId" type="string">
+  The application ID that was revoked
+</ParamField>
+
+#### Behavior
+
+1. Event is emitted when heartbeat receives `status: 'denied'` from Worker
+2. Application has **one event loop tick** to perform cleanup
+3. Process automatically exits with code `1` after cleanup
+
+<Warning>
+You have limited time to clean up resources. Keep your cleanup handlers fast and focused on critical operations like closing database connections.
+</Warning>
+
+#### Example
+
+```javascript
+import { vault } from '@suronai/sdk'
+import { db } from './database.js'
+import { cache } from './cache.js'
+
+// Register cleanup handler before loading vault
+vault.events.on('revoked', async (appId) => {
+  console.log(`Access revoked for ${appId} - cleaning up...`)
+  
+  try {
+    // Close database connections
+    await db.close()
+    
+    // Close Redis/cache connections
+    await cache.disconnect()
+    
+    // Flush logs
+    await logger.flush()
+    
+    console.log('Cleanup complete')
+  } catch (error) {
+    console.error('Cleanup error:', error)
+  }
+})
+
+// Now load the vault
+await vault.load()
+```
+
+---
+
+## Heartbeat System
+
+The heartbeat system monitors vault status and triggers events.
+
+### How It Works
+
+<Steps>
+  <Step title="Heartbeat Starts">
+    After successful `vault.load()`, a heartbeat interval is started (every 30 seconds)
+  </Step>
+  
+  <Step title="Status Check">
+    Each heartbeat sends current vault version to Worker via `/heartbeat` endpoint
+  </Step>
+  
+  <Step title="Status Response">
+    Worker responds with:
+    - `status`: Current approval status (`active`, `denied`, etc.)
+    - `vaultVersion`: Latest vault version number
+    - `shouldReload`: Whether secrets need to be reloaded
+  </Step>
+  
+  <Step title="Action Taken">
+    Based on response:
+    - If `status === 'denied'`: Emit `revoked` event and exit
+    - If `shouldReload === true`: Trigger hot-reload of secrets
+    - Otherwise: Continue heartbeat
+  </Step>
+</Steps>
+
+### Heartbeat Configuration
+
+```javascript
+const HEARTBEAT_MS = 30000 // 30 seconds
+```
+
+<Info>
+The heartbeat interval is not user-configurable. It's optimized for a balance between responsiveness and Worker request costs.
+</Info>
+
+---
+
+## Heartbeat Endpoints
+
+The heartbeat system interacts with the Worker:
+
+### POST /heartbeat
+
+**Request**
+```json
+{
+  "appId": "my-api-production",
+  "knownVaultVersion": 5
+}
+```
+
+**Response (Active)**
+```json
+{
+  "ok": true,
+  "status": "active",
+  "vaultVersion": 5,
+  "shouldReload": false
+}
+```
+
+**Response (Vault Updated)**
+```json
+{
+  "ok": true,
+  "status": "active",
+  "vaultVersion": 6,
+  "shouldReload": true
+}
+```
+
+**Response (Access Revoked)**
+```json
+{
+  "ok": true,
+  "status": "denied",
+  "vaultVersion": 5,
+  "shouldReload": false
+}
+```
+
+---
+
+## Hot-Reload on Update
+
+When the vault is updated (via `suron encrypt` or `suron upload`), the heartbeat automatically triggers a hot-reload:
+
+```javascript
+if (shouldReload) {
+  clearInterval(iv)  // pause heartbeat during reload
+  setKnownVaultVersion(vaultVersion)
+  await hotReload(workerUrl, appId, token, vaultVersion)
+  // Resume heartbeat after reload
+  startHeartbeat(workerUrl, appId, token)
+}
+```
+
+### Hot-Reload Process
+
+<Steps>
+  <Step title="Detect Update">
+    Heartbeat detects `vaultVersion > knownVaultVersion`
+  </Step>
+  
+  <Step title="Pause Heartbeat">
+    Stop heartbeat interval during reload
+  </Step>
+  
+  <Step title="Reload Secrets">
+    Call `vault.hotReload()` to fetch and decrypt new secrets
+  </Step>
+  
+  <Step title="Update Environment">
+    New secrets are loaded into `process.env` without restart
+  </Step>
+  
+  <Step title="Resume Heartbeat">
+    Restart heartbeat with updated vault version
+  </Step>
+</Steps>
+
+<Info>
+Hot-reload happens **in-place** without restarting your application. Existing connections and state are preserved.
+</Info>
+
+---
+
+## Complete Example
+
+```javascript
+import express from 'express'
+import { vault } from '@suronai/sdk'
+import { pool } from './database.js'
+import { redis } from './cache.js'
+
+const app = express()
+
+// Setup cleanup handler BEFORE loading vault
+vault.events.on('revoked', async (appId) => {
+  console.log(`🚨 Access revoked for ${appId}`)  
+  
+  try {
+    // Close database pool
+    console.log('Closing database connections...')
+    await pool.end()
+    
+    // Close Redis
+    console.log('Closing Redis connection...')
+    await redis.quit()
+    
+    console.log('✓ Cleanup complete - exiting')
+  } catch (error) {
+    console.error('Cleanup error:', error)
+  }
+  
+  // Process will exit automatically after this handler
+})
+
+async function main() {
+  // Load vault
+  await vault.load()
+  console.log('✓ Vault loaded')
+  
+  // Start server
+  const port = process.env.PORT || 3000
+  app.listen(port, () => {
+    console.log(`Server running on port ${port}`)
+  })
+}
+
+main().catch(error => {
+  console.error('Failed to start:', error)
+  process.exit(1)
+})
+```
+
+---
+
+## Event Reference
+
+| Event | Parameters | Description | Timing |
+|-------|------------|-------------|--------|
+| `revoked` | `appId: string` | Access revoked by admin | Before process exit |
+
+---
+
+## Source Code
+
+The heartbeat and event system is implemented in:
+
+- **Heartbeat Logic**: SDK/src/heartbeat.js
+- **Event Emitter**: SDK/src/heartbeat.js:11
+- **Integration**: SDK/src/vault.js (calls `startHeartbeat`)
+
+### startHeartbeat Function
+
+```javascript
+export function startHeartbeat(workerUrl, appId, token) {
+  const iv = setInterval(async () => {
+    try {
+      const knownVaultVersion = getKnownVaultVersion()
+
+      const { status, shouldReload, vaultVersion } = await post(
+        workerUrl, '/heartbeat',
+        { appId, knownVaultVersion },
+        token
+      )
+
+      if (status === 'denied') {
+        clearInterval(iv)
+        log.error('Access revoked by admin — shutting down')
+        events.emit('revoked', appId)
+        setImmediate(() => process.exit(1))
+        return
+      }
+
+      if (shouldReload) {
+        clearInterval(iv)
+        setKnownVaultVersion(vaultVersion)
+        await hotReload(workerUrl, appId, token, vaultVersion)
+        startHeartbeat(workerUrl, appId, token)
+      }
+
+    } catch { /* transient network blip — keep running */ }
+  }, HEARTBEAT_MS)
+
+  iv.unref()
+}
+```
+
+#### Source Reference
+
+See SDK/src/heartbeat.js:13

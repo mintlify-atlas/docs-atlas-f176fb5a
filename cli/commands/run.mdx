@@ -1,0 +1,376 @@
+---
+title: suron run
+description: Run a Node.js script with decrypted secrets injected as environment variables
+---
+
+The `run` command executes a Node.js script with all secrets from your vault automatically decrypted and injected as environment variables. This is the recommended way to run applications locally with encrypted secrets.
+
+## Usage
+
+```bash
+suron run <script> [--app name]
+```
+
+## Parameters
+
+<ParamField path="script" type="string" required>
+  Path to the Node.js script to execute. Positional argument.
+</ParamField>
+
+<ParamField path="--app" type="string">
+  App name. If not provided, reads from `.env.suron` or falls back to `.env` in plaintext mode.
+</ParamField>
+
+## Examples
+
+### Run a Server
+
+```bash
+suron run server.js
+```
+
+Output:
+
+```bash
+⋯ Decrypting .env.suron
+✓ 5 secrets decrypted
+
+⋯ node server.js
+
+Server listening on port 3000...
+```
+
+### Run a Script
+
+```bash
+suron run scripts/migrate.js
+```
+
+### Run with App Name
+
+```bash
+suron run server.js --app production
+```
+
+### Run Build Process
+
+```bash
+suron run build.js
+```
+
+## How It Works
+
+1. **Checks for `.env` and `.env.suron`** files
+2. **Loads secrets** from the appropriate file:
+   - If both exist: Uses `.env` (plaintext) with a warning
+   - If only `.env.suron`: Decrypts all secrets
+   - If only `.env`: Loads plaintext
+3. **Fetches master key** (if using `.env.suron`)
+4. **Decrypts secrets** and builds environment object
+5. **Spawns Node.js** with `node <script>`
+6. **Injects secrets** as environment variables
+7. **Inherits stdio** - script output appears in your terminal
+
+## Environment Loading
+
+### From `.env.suron` (Encrypted)
+
+The preferred mode - decrypts and injects secrets:
+
+```bash
+suron run server.js
+```
+
+Output:
+
+```bash
+⋯ Decrypting .env.suron
+✓ 5 secrets decrypted
+
+⋯ node server.js
+```
+
+Secrets are decrypted in memory and passed to the script.
+
+### From `.env` (Plaintext)
+
+If only `.env` exists:
+
+```bash
+suron run server.js
+```
+
+Output:
+
+```bash
+⋯ Loading .env (plain)
+
+⋯ node server.js
+```
+
+Secrets are loaded as plaintext.
+
+### Both Files Exist
+
+If both `.env` and `.env.suron` exist, `.env` takes precedence:
+
+```bash
+suron run server.js
+```
+
+Output:
+
+```bash
+⚠ .env and .env.suron both found — using .env (plain), .env.suron ignored
+
+⋯ node server.js
+```
+
+<Warning>
+  When both files exist, the plaintext `.env` is used and `.env.suron` is ignored. Remove `.env` to use encrypted secrets.
+</Warning>
+
+## Environment Variable Injection
+
+The script receives all secrets as environment variables:
+
+**`.env.suron` contents:**
+```bash
+DATABASE_URL=enc:sv1:...
+API_KEY=enc:sv1:...
+PORT=enc:sv1:...
+```
+
+**In your script:**
+```javascript
+// server.js
+console.log(process.env.DATABASE_URL)  // postgres://...
+console.log(process.env.API_KEY)       // sk_live_abc123
+console.log(process.env.PORT)          // 3000
+```
+
+### Inherits Process Environment
+
+The script also inherits your shell's environment:
+
+```bash
+export NODE_ENV=production
+suron run server.js
+```
+
+**In script:**
+```javascript
+console.log(process.env.NODE_ENV)  // production (from shell)
+console.log(process.env.API_KEY)   // sk_live_abc123 (from vault)
+```
+
+Vault secrets override shell variables with the same name.
+
+## Script Execution
+
+### Exit Codes
+
+The command propagates the script's exit code:
+
+```bash
+suron run failing-script.js
+echo $?
+# Output: 1 (if script exited with code 1)
+```
+
+### Signal Handling
+
+The script receives signals (Ctrl+C, etc.):
+
+```bash
+suron run long-running-server.js
+^C  # Ctrl+C stops the server
+```
+
+### Stdio Inheritance
+
+Script output appears directly in your terminal:
+
+```javascript
+// script.js
+console.log('Hello from script')
+console.error('Error message')
+```
+
+Output:
+
+```bash
+suron run script.js
+
+⋯ node script.js
+
+Hello from script
+Error message
+```
+
+## Error Cases
+
+### Missing Script Argument
+
+```bash
+suron run
+```
+
+Output:
+
+```bash
+✗ Usage: suron run <script> [--app name]
+```
+
+### Script Not Found
+
+```bash
+suron run nonexistent.js
+```
+
+Output:
+
+```bash
+✗ Script not found: nonexistent.js
+```
+
+### No Environment Files
+
+```bash
+suron run server.js
+```
+
+Output (if neither `.env` nor `.env.suron` exists):
+
+```bash
+✗ No .env or .env.suron found
+```
+
+Solution: Create one of these files:
+
+```bash
+# Option 1: Encrypt existing secrets
+suron encrypt
+
+# Option 2: Create plaintext .env
+echo "DATABASE_URL=postgres://localhost/mydb" > .env
+```
+
+### Missing App Name
+
+```bash
+suron run server.js
+```
+
+Output (if `.env.suron` exists but has no `VAULT_APP`):
+
+```bash
+✗ App name not found — pass --app or check VAULT_APP in .env.suron
+```
+
+Solution: Provide `--app` or reinitialize:
+
+```bash
+suron run server.js --app myapp
+```
+
+### Not Logged In
+
+```bash
+✗ Not logged in — run: suron login
+```
+
+Solution: [Authenticate first](/cli/authentication#login)
+
+## Use Cases
+
+### Local Development
+
+```bash
+# Start development server with encrypted secrets
+suron run dev-server.js
+```
+
+### Database Migrations
+
+```bash
+# Run migrations with production database credentials
+suron run scripts/migrate.js --app production
+```
+
+### Build Scripts
+
+```bash
+# Build with API keys injected
+suron run build.js
+```
+
+### Testing
+
+```bash
+# Run tests with test database credentials
+suron run test.js --app test
+```
+
+### One-Off Scripts
+
+```bash
+# Seed database
+suron run scripts/seed-data.js
+
+# Generate report
+suron run scripts/weekly-report.js
+```
+
+## Best Practices
+
+1. **Use for local development** - Mirrors production secret injection
+2. **Don't commit `.env`** - Use encrypted `.env.suron` instead
+3. **Remove `.env` when using vault** - Avoid conflicts
+4. **Use environment-specific scripts** - Different scripts for dev/staging/prod
+5. **Test scripts with `run` first** - Verify secrets before deployment
+
+## Workflow Example
+
+```bash
+# 1. Initialize and encrypt secrets
+suron init --app myapp
+suron encrypt
+
+# 2. Remove plaintext .env
+rm .env  # Now only .env.suron exists
+
+# 3. Run your application
+suron run server.js
+
+# Output:
+# ⋯ Decrypting .env.suron
+# ✓ 5 secrets decrypted
+# 
+# ⋯ node server.js
+# 
+# Server listening on port 3000...
+```
+
+## Alternative: Manual Decryption
+
+Instead of `suron run`, you can manually decrypt secrets:
+
+```bash
+# Less convenient
+export DATABASE_URL=$(suron decrypt DATABASE_URL)
+export API_KEY=$(suron decrypt API_KEY)
+node server.js
+
+# More convenient
+suron run server.js
+```
+
+`suron run` is recommended for its simplicity and automatic secret management.
+
+## Related Commands
+
+- [suron decrypt](/cli/commands/decrypt) - Manually decrypt individual secrets
+- [suron list](/cli/commands/list) - List available secrets
+- [suron encrypt](/cli/commands/encrypt) - Create encrypted vault
+- [suron init](/cli/commands/init) - Initialize app for vault usage

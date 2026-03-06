@@ -1,0 +1,384 @@
+---
+title: Cloudflare Worker Deployment
+description: Deploy and configure the Suron Vault Cloudflare Worker
+---
+
+The Cloudflare Worker is the central hub of Suron Vault. It handles all API requests from the SDK and CLI, processes Telegram webhooks, and orchestrates data storage across KV and Convex.
+
+## Prerequisites
+
+- Cloudflare account (free tier works)
+- Node.js 18+ installed
+- `wrangler` CLI installed
+- Convex backend deployed (see [Convex Setup](/infrastructure/convex-setup))
+- Telegram bot created (see [Telegram Bot](/infrastructure/telegram-bot))
+
+## Install Wrangler
+
+```bash
+npm install -g wrangler
+```
+
+Authenticate with Cloudflare:
+
+```bash
+wrangler login
+```
+
+## Project Structure
+
+The Worker code is located in the repository at `worker/`:
+
+```
+worker/
+├── src/
+│   ├── index.js      # Main request handler and routes
+│   ├── telegram.js   # Telegram webhook and bot commands
+│   ├── db.js         # Convex API wrappers
+│   └── utils.js      # Auth helpers and utilities
+├── scripts/
+│   └── set-webhook.js # Telegram webhook setup script
+├── wrangler.toml     # Worker configuration
+└── package.json
+```
+
+## Configuration
+
+### wrangler.toml
+
+Edit `worker/wrangler.toml`:
+
+```toml
+name = "suronai-vault"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+[[kv_namespaces]]
+binding = "KV"
+id      = "YOUR_KV_NAMESPACE_ID"
+
+[vars]
+ADMIN_CHAT_ID = "YOUR_TELEGRAM_CHAT_ID"
+```
+
+<Warning>
+  Replace `YOUR_KV_NAMESPACE_ID` and `YOUR_TELEGRAM_CHAT_ID` with your actual values.
+</Warning>
+
+## Create KV Namespace
+
+Create a KV namespace for storing key halves and vault files:
+
+```bash
+wrangler kv:namespace create KV
+```
+
+This outputs:
+```
+{ binding = "KV", id = "abc123def456..." }
+```
+
+Copy the `id` value into `wrangler.toml` at the `id` field under `[[kv_namespaces]]`.
+
+## Get Your Telegram Chat ID
+
+<Steps>
+  <Step title="Message your bot">
+    Send any message to your Telegram bot (e.g., `/start`)
+  </Step>
+  
+  <Step title="Fetch updates">
+    ```bash
+    curl https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates
+    ```
+  </Step>
+  
+  <Step title="Find your chat_id">
+    Look for `"chat":{"id":123456789,...}` in the response.
+    
+    Use this number as `ADMIN_CHAT_ID` in `wrangler.toml`.
+  </Step>
+</Steps>
+
+## Configure Secrets
+
+Secrets are stored encrypted in Cloudflare and never appear in `wrangler.toml` or git.
+
+<Steps>
+  <Step title="Generate tokens">
+    Generate secure random tokens:
+    
+    ```bash
+    openssl rand -hex 32  # VAULT_ACCESS_TOKEN
+    openssl rand -hex 32  # VAULT_CLI_TOKEN
+    ```
+  </Step>
+  
+  <Step title="Set secrets via wrangler">
+    ```bash
+    wrangler secret put BOT_TOKEN
+    # Paste your Telegram bot token from @BotFather
+    
+    wrangler secret put VAULT_ACCESS_TOKEN
+    # Paste the first generated token (used by SDK on servers)
+    
+    wrangler secret put VAULT_CLI_TOKEN
+    # Paste the second generated token (used by CLI after login)
+    
+    wrangler secret put ADMIN_USERNAME
+    # Choose a username for CLI login
+    
+    wrangler secret put ADMIN_PASSWORD
+    # Choose a secure password for CLI login
+    
+    wrangler secret put CONVEX_URL
+    # Your Convex deployment URL (e.g., https://happy-animal-123.convex.cloud)
+    
+    wrangler secret put CONVEX_DEPLOY_KEY
+    # Deploy key from Convex dashboard > Settings > Deploy Keys
+    ```
+  </Step>
+</Steps>
+
+### Required Secrets Reference
+
+| Secret | Description | How to Generate |
+|--------|-------------|------------------|
+| `BOT_TOKEN` | Telegram bot token | Get from [@BotFather](https://t.me/botfather) |
+| `VAULT_ACCESS_TOKEN` | Server SDK authentication token | `openssl rand -hex 32` |
+| `VAULT_CLI_TOKEN` | CLI authentication token (returned by `/admin/login`) | `openssl rand -hex 32` |
+| `ADMIN_USERNAME` | CLI login username | Choose any username |
+| `ADMIN_PASSWORD` | CLI login password | Choose a secure password |
+| `CONVEX_URL` | Convex deployment URL | From Convex dashboard |
+| `CONVEX_DEPLOY_KEY` | Convex deploy key for API access | Settings > Deploy Keys > Create Deploy Key |
+
+<Info>
+  **Token Separation**: `VAULT_ACCESS_TOKEN` is used by the SDK on production servers and can only access SDK routes. `VAULT_CLI_TOKEN` is used by the CLI on your dev machine and can access admin routes. This ensures compromised servers cannot rotate keys or modify the vault.
+</Info>
+
+## Deploy the Worker
+
+<Steps>
+  <Step title="Install dependencies">
+    ```bash
+    cd worker
+    npm install
+    ```
+  </Step>
+  
+  <Step title="Deploy to Cloudflare">
+    ```bash
+    npm run deploy
+    ```
+    
+    Or using wrangler directly:
+    ```bash
+    wrangler deploy
+    ```
+  </Step>
+  
+  <Step title="Note your Worker URL">
+    Deployment output shows:
+    ```
+    Published suronai-vault (1.23 sec)
+      https://suronai-vault.your-account.workers.dev
+    ```
+    
+    This is your `VAULT_WORKER_URL` - you'll need it for SDK and CLI configuration.
+  </Step>
+</Steps>
+
+## Setup Telegram Webhook
+
+Telegram needs to know where to send bot updates:
+
+<Steps>
+  <Step title="Set environment variables">
+    ```bash
+    export BOT_TOKEN="your_telegram_bot_token"
+    export VAULT_WORKER_URL="https://suronai-vault.your-account.workers.dev"
+    ```
+  </Step>
+  
+  <Step title="Run webhook setup script">
+    ```bash
+    npm run webhook
+    ```
+    
+    Or run directly:
+    ```bash
+    node scripts/set-webhook.js
+    ```
+    
+    Expected output:
+    ```
+    Webhook set: https://suronai-vault.your-account.workers.dev/webhook
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+  If you update your Worker URL or domain, you must run the webhook setup script again.
+</Warning>
+
+## Verify Deployment
+
+Test that the Worker is responding:
+
+```bash
+curl https://suronai-vault.your-account.workers.dev/admin/login \
+  -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"username":"your_admin_username","password":"your_admin_password"}'
+```
+
+Expected response:
+```json
+{"token":"your_vault_cli_token"}
+```
+
+## API Routes
+
+The Worker exposes these routes:
+
+### Public Routes
+
+| Route | Method | Description | Auth |
+|-------|--------|-------------|------|
+| `/webhook` | POST | Telegram webhook endpoint | Verified by Telegram |
+| `/admin/login` | POST | CLI authentication | Username + password |
+
+### SDK Routes (require `VAULT_ACCESS_TOKEN`)
+
+| Route | Method | Description |
+|-------|--------|-------------|
+| `/fetch-vault` | POST | Get encrypted vault data |
+| `/request` | POST | Request access approval (triggers Telegram) |
+| `/resume` | POST | Trusted restart with permit token |
+| `/status` | POST | Poll approval status |
+| `/keys` | POST | Get both key halves (only when approved) |
+| `/loaded` | POST | Confirm secrets loaded, set status to active |
+| `/heartbeat` | POST | Keep-alive and vault version check |
+
+### CLI Admin Routes (require `VAULT_CLI_TOKEN`)
+
+| Route | Method | Description |
+|-------|--------|-------------|
+| `/admin/init` | POST | Register new app and store key halves |
+| `/admin/keys` | POST | Retrieve key halves for an app |
+| `/admin/rotate` | POST | Update key halves (revokes all permits) |
+| `/admin/upload` | POST | Upload encrypted vault (increments version) |
+
+## KV Storage Schema
+
+Data stored in Cloudflare KV:
+
+| Key Pattern | Value | TTL |
+|-------------|-------|-----|
+| `vault:{appId}` | Encrypted vault file content | None |
+| `key:cf:{appId}` | Cloudflare half of master key | None |
+| `permit:{appId}` | Temporary permit token | 24 hours |
+
+## Update Deployed Worker
+
+To update the Worker after making changes:
+
+```bash
+wrangler deploy
+```
+
+Secrets and KV data are preserved across deployments.
+
+## View Logs
+
+Stream live Worker logs:
+
+```bash
+wrangler tail
+```
+
+Filter for errors only:
+
+```bash
+wrangler tail --status error
+```
+
+## Custom Domain (Optional)
+
+To use a custom domain instead of `*.workers.dev`:
+
+<Steps>
+  <Step title="Add route in Cloudflare Dashboard">
+    1. Go to Workers > Routes
+    2. Add route: `vault.yourdomain.com/*`
+    3. Select your Worker
+  </Step>
+  
+  <Step title="Update DNS">
+    Add a CNAME record:
+    ```
+    vault.yourdomain.com → your-account.workers.dev
+    ```
+  </Step>
+  
+  <Step title="Update webhook">
+    ```bash
+    export VAULT_WORKER_URL="https://vault.yourdomain.com"
+    npm run webhook
+    ```
+  </Step>
+</Steps>
+
+## Troubleshooting
+
+### "Missing required env var: KV"
+
+KV namespace not bound. Check:
+1. KV namespace created: `wrangler kv:namespace list`
+2. ID in `wrangler.toml` matches
+3. Redeployed after updating `wrangler.toml`
+
+### "Unauthorized" on SDK requests
+
+Check:
+1. `VAULT_ACCESS_TOKEN` secret set in Worker: `wrangler secret list`
+2. Server `.env` has matching token:
+   ```env
+   VAULT_ACCESS_TOKEN=<same value as Worker secret>
+   ```
+3. SDK sends token in header: `x-vault-token`
+
+### Telegram webhook not working
+
+Verify webhook is set:
+```bash
+curl https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getWebhookInfo
+```
+
+Response should show:
+```json
+{
+  "url": "https://suronai-vault.your-account.workers.dev/webhook",
+  "has_custom_certificate": false,
+  "pending_update_count": 0
+}
+```
+
+### "CONVEX_URL not configured"
+
+Ensure Convex secrets are set:
+```bash
+wrangler secret put CONVEX_URL
+wrangler secret put CONVEX_DEPLOY_KEY
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Setup Telegram Bot" icon="telegram" href="/infrastructure/telegram-bot">
+    Configure bot commands and test approval workflow
+  </Card>
+  <Card title="Environment Variables" icon="code" href="/infrastructure/environment-variables">
+    Complete reference of all configuration options
+  </Card>
+</CardGroup>

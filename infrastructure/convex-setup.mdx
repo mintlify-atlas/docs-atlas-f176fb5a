@@ -1,0 +1,390 @@
+---
+title: Convex Backend Setup
+description: Deploy and configure the Convex backend for Suron Vault
+---
+
+Convex stores app state, activity logs, and the Convex half of the split master key. It provides real-time queries and mutations for the Cloudflare Worker.
+
+## Prerequisites
+
+- [Convex account](https://www.convex.dev/) (free tier available)
+- Node.js 18+ installed
+
+## Create Convex Project
+
+<Steps>
+  <Step title="Sign up for Convex">
+    Go to [convex.dev](https://www.convex.dev/) and create an account
+  </Step>
+  
+  <Step title="Create a new project">
+    In the Convex dashboard, click **New Project**
+    
+    Name it something like `suron-vault`
+  </Step>
+  
+  <Step title="Note your deployment URL">
+    After creation, you'll see your deployment URL:
+    ```
+    https://happy-animal-123.convex.cloud
+    ```
+    
+    Save this - you'll need it for the Worker's `CONVEX_URL` secret
+  </Step>
+</Steps>
+
+## Deploy Convex Functions
+
+The Convex backend code is in the repository at `convex/`:
+
+```
+convex/
+├── schema.js     # Database schema definition
+└── vault.js      # Queries and mutations
+```
+
+### Install Convex CLI
+
+```bash
+npm install -g convex
+```
+
+### Deploy to Convex
+
+<Steps>
+  <Step title="Navigate to convex directory">
+    ```bash
+    cd convex
+    ```
+  </Step>
+  
+  <Step title="Initialize Convex (first time only)">
+    ```bash
+    npx convex dev --once
+    ```
+    
+    This will:
+    - Prompt you to log in
+    - Link to your Convex project
+    - Deploy the schema and functions
+  </Step>
+  
+  <Step title="For production deployment">
+    ```bash
+    npx convex deploy
+    ```
+  </Step>
+</Steps>
+
+## Database Schema
+
+The schema is defined in `convex/schema.js`:
+
+### vault_apps Table
+
+Stores app registration and state:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `appId` | string | Unique app identifier |
+| `status` | string | Current status: `idle`, `pending`, `approved`, `active`, `denied` |
+| `convexHalf` | string (optional) | Convex half of the master key |
+| `lastActive` | number (optional) | Timestamp when secrets were last loaded |
+| `lastHeartbeat` | number (optional) | Timestamp of last heartbeat |
+| `hostname` | string (optional) | Server hostname |
+| `createdAt` | number | App registration timestamp |
+| `permitToken` | string (optional) | 24-hour permit token for trusted restarts |
+| `permitExpiry` | number (optional) | Permit expiration timestamp |
+| `vaultVersion` | number (optional) | Incremented on vault upload, triggers hot-reload |
+
+**Index**: `by_appId` on `[appId]`
+
+### vault_logs Table
+
+Activity log for audit trail:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `appId` | string | App identifier |
+| `action` | string | Action type (see actions below) |
+| `timestamp` | number | When the action occurred |
+
+**Index**: `by_appId` on `[appId]`
+
+### Logged Actions
+
+- `initialized` - App registered via `suron init`
+- `access_requested` - SDK called `/request`
+- `approved` - Admin approved access
+- `denied` - Admin denied access
+- `stopped` - Admin stopped running app
+- `revoked` - Access revoked
+- `resumed_with_permit` - Trusted restart succeeded
+- `secrets_loaded` - SDK loaded secrets into memory
+- `key_rotated` - Master key rotated
+- `vault_uploaded` - Vault file updated
+
+## Convex Functions
+
+The `vault.js` file exports queries and mutations:
+
+### Mutations (write operations)
+
+```javascript
+// App lifecycle
+vault:createApp        // Register new app
+vault:setStatus        // Update status (idle, pending, approved, active, denied)
+vault:updateLastActive // Update lastActive timestamp
+vault:updateHeartbeat  // Update lastHeartbeat timestamp
+vault:setHostname      // Set server hostname
+
+// Key management
+vault:storeConvexHalf  // Store Convex half of master key
+
+// Permit tokens
+vault:issuePermit      // Generate 24h permit token on approval
+vault:revokePermit     // Clear permit (on stop or rotate)
+
+// Vault versioning
+vault:incrementVaultVersion // Bump version (on upload)
+
+// Logging
+vault:logActivity      // Write activity log entry
+```
+
+### Queries (read operations)
+
+```javascript
+vault:getApp           // Get single app by appId
+vault:listApps         // Get all apps
+vault:getConvexHalf    // Retrieve Convex key half
+vault:validatePermit   // Check if permit token is valid
+vault:getRecentLogs    // Get last 10 log entries for an app
+```
+
+## Example Usage
+
+The Worker calls Convex functions via HTTP API:
+
+### Create App
+
+```javascript
+// worker/src/db.js
+export const createApp = (env, appId) => 
+  convexMutation(env, 'vault:createApp', { 
+    appId, 
+    createdAt: Date.now() 
+  })
+```
+
+HTTP request:
+```bash
+POST https://happy-animal-123.convex.cloud/api/mutation
+Authorization: Convex <CONVEX_DEPLOY_KEY>
+Content-Type: application/json
+
+{
+  "path": "vault:createApp",
+  "args": {
+    "appId": "my-app",
+    "createdAt": 1704067200000
+  }
+}
+```
+
+### Query App Status
+
+```javascript
+export const getApp = (env, appId) => 
+  convexQuery(env, 'vault:getApp', { appId })
+```
+
+HTTP request:
+```bash
+POST https://happy-animal-123.convex.cloud/api/query
+Authorization: Convex <CONVEX_DEPLOY_KEY>
+Content-Type: application/json
+
+{
+  "path": "vault:getApp",
+  "args": {
+    "appId": "my-app"
+  }
+}
+```
+
+Response:
+```json
+{
+  "value": {
+    "_id": "...",
+    "appId": "my-app",
+    "status": "active",
+    "convexHalf": "abc123...",
+    "hostname": "prod-server-01",
+    "lastActive": 1704067200000,
+    "lastHeartbeat": 1704067230000,
+    "createdAt": 1704000000000,
+    "permitToken": "def456...",
+    "permitExpiry": 1704153600000,
+    "vaultVersion": 5
+  }
+}
+```
+
+## Get Deploy Key
+
+The Worker needs a deploy key to call Convex functions:
+
+<Steps>
+  <Step title="Open Convex Dashboard">
+    Go to your project: https://dashboard.convex.dev/
+  </Step>
+  
+  <Step title="Navigate to Settings">
+    Click **Settings** in the left sidebar
+  </Step>
+  
+  <Step title="Create Deploy Key">
+    1. Go to **Deploy Keys** section
+    2. Click **Create Deploy Key**
+    3. Name it `suron-vault-worker`
+    4. Copy the key (starts with `prod:...`)
+  </Step>
+  
+  <Step title="Add to Worker secrets">
+    ```bash
+    wrangler secret put CONVEX_DEPLOY_KEY
+    # Paste the deploy key
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+  Deploy keys grant full read/write access to your Convex backend. Store them securely as Cloudflare Worker secrets - never commit to git.
+</Warning>
+
+## Local Development
+
+To test Convex functions locally:
+
+```bash
+cd convex
+npx convex dev
+```
+
+This starts a local development server and watches for changes.
+
+## Update Deployed Functions
+
+After modifying `schema.js` or `vault.js`:
+
+```bash
+npx convex deploy
+```
+
+Changes are applied immediately. Existing data is preserved unless you modify the schema in incompatible ways.
+
+## View Data in Dashboard
+
+<Steps>
+  <Step title="Open Data view">
+    In Convex dashboard, click **Data** in the left sidebar
+  </Step>
+  
+  <Step title="Browse tables">
+    - Select `vault_apps` to see all registered apps
+    - Select `vault_logs` to view activity logs
+  </Step>
+  
+  <Step title="Query data">
+    You can run queries directly in the dashboard:
+    ```javascript
+    // Get all active apps
+    db.query("vault_apps")
+      .filter(q => q.eq(q.field("status"), "active"))
+      .collect()
+    ```
+  </Step>
+</Steps>
+
+## Security Considerations
+
+### Deploy Key Protection
+
+- Deploy keys have full access to your Convex data
+- Store only in Worker secrets, never in code
+- Rotate if compromised:
+  1. Create new deploy key in dashboard
+  2. Update Worker secret
+  3. Delete old key
+
+### Data Encryption
+
+Convex data is encrypted at rest by Convex. The `convexHalf` field contains half of the master key - it cannot decrypt secrets on its own.
+
+### Access Control
+
+Convex functions have no built-in authentication. The Worker acts as the authentication layer:
+- SDK requests → checked for `VAULT_ACCESS_TOKEN`
+- CLI requests → checked for `VAULT_CLI_TOKEN`
+- Only the Worker can call Convex functions
+
+## Monitoring
+
+### Function Logs
+
+View function execution logs in the dashboard:
+1. Go to **Logs** in sidebar
+2. Filter by function name (e.g., `vault:createApp`)
+3. See arguments, return values, and errors
+
+### Performance
+
+Check function performance:
+1. Go to **Functions** in sidebar
+2. See execution times and call frequency
+3. Identify slow queries
+
+## Troubleshooting
+
+### "Function not found"
+
+Functions not deployed. Run:
+```bash
+cd convex
+npx convex deploy
+```
+
+### "Unauthorized" from Worker
+
+Deploy key incorrect or not set:
+```bash
+wrangler secret put CONVEX_DEPLOY_KEY
+```
+
+Verify URL matches:
+```bash
+wrangler secret list
+# Should show CONVEX_URL and CONVEX_DEPLOY_KEY
+```
+
+### Schema validation errors
+
+If you change the schema, deploy it:
+```bash
+npx convex deploy
+```
+
+Convex validates data against the schema. Ensure existing data matches new schema or migrate it.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Deploy Worker" icon="cloud" href="/infrastructure/cloudflare-worker">
+    Connect the Worker to your Convex backend
+  </Card>
+  <Card title="Environment Variables" icon="code" href="/infrastructure/environment-variables">
+    Complete reference of all configuration options
+  </Card>
+</CardGroup>

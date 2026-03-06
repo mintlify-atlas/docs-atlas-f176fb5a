@@ -1,0 +1,603 @@
+---
+title: Migration Guide
+description: Migrate from other secrets managers to Suron Vault and implement best practices
+---
+
+Migrate from environment variables, dotenv, AWS Secrets Manager, HashiCorp Vault, or other solutions to Suron Vault.
+
+## From Plain .env Files
+
+The most common migration path - from unencrypted `.env` files to Suron Vault.
+
+<Steps>
+  <Step title="Backup your existing .env">
+    ```bash
+    cp .env .env.backup
+    ```
+  </Step>
+
+  <Step title="Install Suron CLI">
+    ```bash
+    npm install -g @suronai/cli
+    suron login
+    ```
+  </Step>
+
+  <Step title="Initialize vault for your app">
+    ```bash
+    suron init --app my-app
+    ```
+
+    This creates `.env.suron` and updates `.gitignore` automatically.
+  </Step>
+
+  <Step title="Encrypt your .env file">
+    ```bash
+    suron encrypt
+    ```
+
+    This reads `.env`, encrypts all values, and creates `.env.suron`:
+
+    **Before (.env)**:
+    ```env
+    DATABASE_URL=postgresql://user:pass@localhost/db
+    API_KEY=sk_live_abc123xyz
+    STRIPE_SECRET=sk_test_def456
+    ```
+
+    **After (.env.suron)**:
+    ```env
+    # Encrypted with Suron
+    # App: my-app
+    VAULT_APP=my-app
+    DATABASE_URL=suron:v1:8f3a2b1c...
+    API_KEY=suron:v1:4e5f6a7b...
+    STRIPE_SECRET=suron:v1:9c8d7e6f...
+    ```
+  </Step>
+
+  <Step title="Update your application code">
+    Remove dotenv and add Suron SDK:
+
+    ```bash
+    npm uninstall dotenv
+    npm install @suronai/sdk
+    ```
+
+    **Before**:
+    ```javascript
+    import 'dotenv/config'
+    import express from 'express'
+
+    const app = express()
+    const db = new Database(process.env.DATABASE_URL)
+    ```
+
+    **After**:
+    ```javascript
+    import { vault } from '@suronai/sdk'
+    import express from 'express'
+
+    // Load secrets first - blocks until approved
+    await vault.load()
+
+    const app = express()
+    const db = new Database(process.env.DATABASE_URL)
+    ```
+  </Step>
+
+  <Step title="Commit and deploy">
+    ```bash
+    git add .env.suron .gitignore
+    git rm .env  # Remove from git if previously committed
+    git commit -m "migrate: switch to Suron Vault"
+    git push
+    ```
+
+    Set server environment variables:
+    ```env
+    VAULT_WORKER_URL=https://suronai-vault.account.workers.dev
+    VAULT_ACCESS_TOKEN=srv_...
+    VAULT_APP_ID=my-app
+    ```
+
+    Deploy and approve via Telegram on first run.
+  </Step>
+</Steps>
+
+<Warning>
+  After confirming Suron works, delete `.env.backup` securely. Don't commit it.
+</Warning>
+
+## From AWS Secrets Manager
+
+Migrate from AWS Secrets Manager to Suron for simpler deployment and Telegram-based approval.
+
+### Before (AWS Secrets Manager)
+
+```javascript
+import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager'
+import express from 'express'
+
+const client = new SecretsManagerClient({ region: 'us-east-1' })
+
+async function getSecret(name) {
+  const command = new GetSecretValueCommand({ SecretId: name })
+  const response = await client.send(command)
+  return JSON.parse(response.SecretString)
+}
+
+const secrets = await getSecret('my-app/production')
+const app = express()
+
+app.get('/api/data', async (req, res) => {
+  const response = await fetch('https://api.example.com/data', {
+    headers: { 'Authorization': `Bearer ${secrets.API_KEY}` }
+  })
+  res.json(await response.json())
+})
+```
+
+### After (Suron Vault)
+
+<Steps>
+  <Step title="Export secrets from AWS">
+    ```bash
+    # Get secret value
+    aws secretsmanager get-secret-value \
+      --secret-id my-app/production \
+      --query SecretString \
+      --output text > secrets.json
+
+    # Convert JSON to .env format
+    cat secrets.json | jq -r 'to_entries|map("\(.key)=\(.value|tostring)")|.[]' > .env
+    ```
+
+    Example output:
+    ```env
+    DATABASE_URL=postgresql://...
+    API_KEY=sk_live_...
+    STRIPE_SECRET=sk_test_...
+    ```
+  </Step>
+
+  <Step title="Encrypt with Suron">
+    ```bash
+    suron init --app my-app
+    suron encrypt
+    ```
+  </Step>
+
+  <Step title="Update application code">
+    ```javascript
+    import { vault } from '@suronai/sdk'
+    import express from 'express'
+
+    await vault.load()
+
+    const app = express()
+
+    app.get('/api/data', async (req, res) => {
+      const response = await fetch('https://api.example.com/data', {
+        headers: { 'Authorization': `Bearer ${process.env.API_KEY}` }
+      })
+      res.json(await response.json())
+    })
+    ```
+  </Step>
+
+  <Step title="Remove AWS SDK dependencies">
+    ```bash
+    npm uninstall @aws-sdk/client-secrets-manager
+    npm install @suronai/sdk
+    ```
+
+    Remove IAM roles and policies for Secrets Manager access.
+  </Step>
+</Steps>
+
+**Benefits of switching**:
+- No AWS credentials needed in your app
+- Simpler code - secrets in `process.env`
+- Telegram approval instead of AWS IAM
+- No per-request API calls to AWS
+- Version control for encrypted secrets
+
+## From HashiCorp Vault
+
+Migrate from HashiCorp Vault to Suron for serverless environments.
+
+### Before (HashiCorp Vault)
+
+```javascript
+import vault from 'node-vault'
+import express from 'express'
+
+const client = vault({
+  endpoint: 'https://vault.company.com',
+  token: process.env.VAULT_TOKEN
+})
+
+const secrets = await client.read('secret/data/my-app')
+const { DATABASE_URL, API_KEY } = secrets.data.data
+
+const app = express()
+// Use secrets...
+```
+
+### After (Suron Vault)
+
+<Steps>
+  <Step title="Export from HashiCorp Vault">
+    ```bash
+    # Login to Vault
+    vault login
+
+    # Read secrets
+    vault kv get -format=json secret/my-app > vault-export.json
+
+    # Convert to .env
+    cat vault-export.json | jq -r '.data.data | to_entries | map("\(.key)=\(.value)") | .[]' > .env
+    ```
+  </Step>
+
+  <Step title="Encrypt with Suron">
+    ```bash
+    suron init --app my-app
+    suron encrypt
+    ```
+  </Step>
+
+  <Step title="Update code">
+    ```javascript
+    import { vault } from '@suronai/sdk'
+    import express from 'express'
+
+    await vault.load()
+
+    // Secrets now in process.env
+    const app = express()
+    ```
+  </Step>
+
+  <Step title="Remove Vault dependencies">
+    ```bash
+    npm uninstall node-vault
+    npm install @suronai/sdk
+    ```
+  </Step>
+</Steps>
+
+## From Doppler
+
+Migrate from Doppler to Suron for Telegram-based approval workflow.
+
+```bash
+# Export from Doppler
+doppler secrets download --no-file --format env > .env
+
+# Encrypt with Suron
+suron init --app my-app
+suron encrypt
+```
+
+Update code:
+
+```javascript
+// Before
+import { config } from 'dotenv'
+config()
+
+// After
+import { vault } from '@suronai/sdk'
+await vault.load()
+```
+
+## Key Rotation Best Practices
+
+Rotate your master encryption key regularly for enhanced security.
+
+### When to Rotate
+
+- **Quarterly**: Regular rotation schedule
+- **After team member departure**: Revoke their access
+- **After security incident**: Immediately rotate
+- **Before major deployment**: Clean slate for production
+
+### How to Rotate
+
+```bash
+suron rotate --app my-app
+```
+
+This command:
+1. Fetches the current master key
+2. Generates a new random master key
+3. Re-encrypts all secrets with the new key
+4. Pushes updated vault to server
+5. Invalidates the old key
+
+**After rotation**:
+```bash
+git add .env.suron
+git commit -m "chore: rotate vault keys"
+git push
+
+# Redeploy immediately - old key is now invalid
+```
+
+<Warning>
+  Redeploy your application immediately after rotation. Running apps with the old key will fail to decrypt secrets.
+</Warning>
+
+### Automated Rotation with GitHub Actions
+
+```yaml
+name: Monthly Key Rotation
+
+on:
+  schedule:
+    - cron: '0 2 1 * *'  # 1st of each month at 2am
+  workflow_dispatch:
+
+jobs:
+  rotate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Install Suron CLI
+        run: npm install -g @suronai/cli
+      
+      - name: Configure auth
+        env:
+          VAULT_WORKER_URL: ${{ secrets.VAULT_WORKER_URL }}
+          VAULT_CLI_TOKEN: ${{ secrets.VAULT_CLI_TOKEN }}
+        run: |
+          mkdir -p ~/.suron
+          echo '{"workerUrl":"'"$VAULT_WORKER_URL"'","token":"'"$VAULT_CLI_TOKEN"'"}' > ~/.suron/auth.json
+      
+      - name: Rotate keys
+        run: suron rotate --app my-app --yes
+      
+      - name: Commit and push
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add .env.suron
+          git commit -m "chore: rotate vault keys [skip ci]"
+          git push
+      
+      - name: Trigger redeployment
+        env:
+          DEPLOY_WEBHOOK: ${{ secrets.DEPLOY_WEBHOOK }}
+        run: curl -X POST $DEPLOY_WEBHOOK
+```
+
+## Permit Persistence
+
+Implement permit token persistence to skip Telegram approval on restarts.
+
+### Why Persist Permits?
+
+- **Faster restarts**: No waiting for Telegram approval
+- **Production reliability**: Auto-recovery from crashes
+- **Zero-downtime deployments**: Rolling updates without manual intervention
+- **CI/CD friendly**: Automated deployments don't block
+
+### Implementation
+
+```javascript
+import { vault } from '@suronai/sdk'
+import { readFileSync, writeFileSync, existsSync } from 'fs'
+
+const PERMIT_FILE = '.vault-permit'
+
+// Load stored permit before vault.load()
+if (existsSync(PERMIT_FILE)) {
+  try {
+    const permit = readFileSync(PERMIT_FILE, 'utf8').trim()
+    process.env.VAULT_PERMIT = permit
+    console.log('Permit found - attempting trusted restart')
+  } catch (err) {
+    console.warn('Failed to read permit file:', err.message)
+  }
+}
+
+// vault.load() will use VAULT_PERMIT if valid
+await vault.load()
+
+// Save permit for next restart
+const newPermit = vault.getPermitToken()
+if (newPermit) {
+  writeFileSync(PERMIT_FILE, newPermit)
+  console.log('Permit saved for next restart')
+}
+
+// Your app code...
+```
+
+### Permit File Security
+
+**Critical**: Add to `.gitignore`
+
+```gitignore
+.vault-permit
+.env
+.env.local
+.env.*.local
+```
+
+**File permissions** (Linux/macOS):
+```bash
+chmod 600 .vault-permit  # Owner read/write only
+```
+
+**Docker**: Mount as secret
+```yaml
+services:
+  app:
+    image: my-app
+    secrets:
+      - vault_permit
+
+secrets:
+  vault_permit:
+    file: .vault-permit
+```
+
+### Permit Lifecycle
+
+- **Duration**: 24 hours from issue
+- **Renewal**: Automatic on each successful `vault.load()`
+- **Expiration**: Falls back to Telegram approval
+- **Revocation**: Admin can revoke via Telegram or worker API
+
+### Fallback Behavior
+
+If permit is invalid (expired, revoked, or corrupted):
+
+```javascript
+await vault.load()
+// 1. Tries permit from VAULT_PERMIT
+// 2. If rejected: "Permit expired - requesting fresh approval"
+// 3. Sends Telegram message
+// 4. Waits for approval (5 min timeout)
+// 5. Issues new permit on approval
+// 6. Saves new permit automatically
+```
+
+No code changes needed - the SDK handles fallback automatically.
+
+## Environment-Specific Vaults
+
+Manage different secrets for dev/staging/prod.
+
+```bash
+# Development
+suron init --app my-app-dev
+suron encrypt --file .env.development
+
+# Staging
+suron init --app my-app-staging
+suron encrypt --file .env.staging
+
+# Production
+suron init --app my-app-prod
+suron encrypt --file .env.production
+```
+
+Set `VAULT_APP_ID` per environment:
+
+```env
+# Development .env
+VAULT_APP_ID=my-app-dev
+
+# Production server
+VAULT_APP_ID=my-app-prod
+```
+
+## Security Best Practices
+
+<Accordion title="Secret hygiene">
+  - **Never** commit `.env` to git
+  - **Always** commit `.env.suron` (it's encrypted)
+  - Add `.vault-permit` to `.gitignore`
+  - Rotate keys quarterly
+  - Audit access via Telegram bot logs
+  - Use separate apps for dev/staging/prod
+</Accordion>
+
+<Accordion title="Access control">
+  - Limit Telegram chat access to authorized admins only
+  - Use different `VAULT_ACCESS_TOKEN` for each environment
+  - Revoke old tokens when rotating
+  - Monitor approval requests for suspicious activity
+  - Set up alerts for denied requests
+</Accordion>
+
+<Accordion title="Deployment">
+  - Set server env vars via platform secrets (not in code)
+  - Use permit persistence in production
+  - Test rotation in staging before prod
+  - Have rollback plan ready
+  - Document approval process for on-call team
+</Accordion>
+
+<Accordion title="Development">
+  - Use separate vault for local development
+  - Don't share permits between developers
+  - Each dev gets their own Telegram approval
+  - Keep production and dev vaults isolated
+  - Use `suron run` for local testing
+</Accordion>
+
+## Rollback Plan
+
+If you need to rollback to `.env`:
+
+```bash
+# 1. Restore .env from backup
+cp .env.backup .env
+
+# 2. Revert code changes
+git revert <commit-hash>
+
+# 3. Reinstall dotenv
+npm install dotenv
+
+# 4. Redeploy
+```
+
+<Tip>
+  Keep `.env.backup` for 1 week after migration, then delete securely.
+</Tip>
+
+## Migration Checklist
+
+<Steps>
+  <Step title="Pre-migration">
+    - [ ] Backup current `.env` file
+    - [ ] Install Suron CLI
+    - [ ] Run `suron login`
+    - [ ] Test in development environment first
+  </Step>
+
+  <Step title="Migration">
+    - [ ] Run `suron init --app my-app`
+    - [ ] Run `suron encrypt`
+    - [ ] Verify `.env.suron` created
+    - [ ] Update `.gitignore`
+    - [ ] Replace dotenv with `@suronai/sdk`
+    - [ ] Add `await vault.load()` as first line
+  </Step>
+
+  <Step title="Deployment">
+    - [ ] Set `VAULT_WORKER_URL` on server
+    - [ ] Set `VAULT_ACCESS_TOKEN` on server
+    - [ ] Set `VAULT_APP_ID` on server
+    - [ ] Commit `.env.suron` to git
+    - [ ] Deploy application
+    - [ ] Approve via Telegram
+  </Step>
+
+  <Step title="Post-migration">
+    - [ ] Verify app starts successfully
+    - [ ] Test all functionality
+    - [ ] Implement permit persistence
+    - [ ] Set up key rotation schedule
+    - [ ] Document approval process
+    - [ ] Delete `.env.backup` after 1 week
+  </Step>
+</Steps>
+
+## Next Steps
+
+- Configure [CI/CD integration](/guides/ci-cd-integration) for automated deployments
+- Set up [hot-reload](/sdk/hot-reload) for zero-downtime secret updates
+- Review [troubleshooting guide](/guides/troubleshooting) for common issues

@@ -1,0 +1,249 @@
+---
+title: suron remove
+description: Remove a secret from your Suron Vault
+---
+
+The `remove` command deletes a secret from your vault. The secret is removed from both the local `.env.suron` file and automatically deleted from Suron.
+
+## Usage
+
+```bash
+suron remove KEY [--app name]
+```
+
+## Parameters
+
+<ParamField path="KEY" type="string" required>
+  The secret key name to remove (e.g., `OLD_API_KEY`). Positional argument.
+</ParamField>
+
+<ParamField path="--app" type="string">
+  App name. If not provided, reads from `.env.suron` file.
+</ParamField>
+
+## Examples
+
+### Remove a Secret
+
+```bash
+suron remove OLD_API_KEY
+```
+
+Output:
+
+```bash
+⋯ Pushing to Suron...
+✓ OLD_API_KEY removed and pushed
+```
+
+### Specify App Name
+
+```bash
+suron remove DEPRECATED_TOKEN --app myapp
+```
+
+## How It Works
+
+1. **Parses KEY** from command argument
+2. **Resolves app name** from `--app` flag or `.env.suron` file
+3. **Reads existing vault** from `.env.suron`
+4. **Filters out the secret** with matching key
+5. **Writes updated vault** to `.env.suron`
+6. **Automatically pushes** to Worker via `POST /admin/upload`
+
+## Vault File Updates
+
+The `.env.suron` file is updated to remove the secret:
+
+**Before:**
+```bash
+# Encrypted with @suronai/cli
+VAULT_APP=myapp
+DATABASE_URL=enc:sv1:c29tZXRoaW5n...
+OLD_API_KEY=enc:sv1:b2xkX2tleQ...
+NEW_API_KEY=enc:sv1:bmV3X2tleQ...
+```
+
+**After removing `OLD_API_KEY`:**
+```bash
+# Encrypted with @suronai/cli
+VAULT_APP=myapp
+DATABASE_URL=enc:sv1:c29tZXRoaW5n...
+NEW_API_KEY=enc:sv1:bmV3X2tleQ...
+```
+
+Comments and other metadata are preserved.
+
+## Automatic Push
+
+After updating the local vault file, the command automatically uploads to Worker:
+
+```bash
+⋯ Pushing to Suron...
+✓ OLD_API_KEY removed and pushed
+```
+
+No separate `suron upload` step is required.
+
+## Error Cases
+
+### Missing Key Argument
+
+```bash
+suron remove
+```
+
+Output:
+
+```bash
+✗ Usage: suron remove KEY [--app name]
+```
+
+### Secret Not Found
+
+```bash
+suron remove NONEXISTENT_KEY
+```
+
+Output:
+
+```bash
+✗ Secret not found: NONEXISTENT_KEY
+```
+
+Verify the key exists with:
+
+```bash
+suron list
+```
+
+### Missing App Name
+
+```bash
+suron remove API_KEY
+```
+
+Output (if no `.env.suron` exists):
+
+```bash
+✗ App name not found — run: suron init --app yourapp
+```
+
+Solution: [Initialize first](/cli/commands/init) or provide `--app`:
+
+```bash
+suron remove API_KEY --app myapp
+```
+
+### Not Logged In
+
+```bash
+✗ Not logged in — run: suron login
+```
+
+Solution: [Authenticate first](/cli/authentication#login)
+
+## Safety Considerations
+
+<Warning>
+  Removing a secret is immediate and irreversible. If your application depends on this secret, it will fail until you redeploy or add a replacement.
+</Warning>
+
+### Before Removing
+
+1. **Verify the key** with `suron list`
+2. **Check dependencies** - Ensure no running apps need this secret
+3. **Have a backup** - Store the value elsewhere if you might need it
+4. **Plan redeployment** - Update and redeploy apps that reference this secret
+
+### Verify Removal
+
+```bash
+# Remove the secret
+suron remove OLD_API_KEY
+
+# Verify it's gone
+suron list
+
+# Attempting to decrypt should fail
+suron decrypt OLD_API_KEY
+# Output: ✗ Secret not found: OLD_API_KEY
+```
+
+## Use Cases
+
+### Rotating Credentials
+
+```bash
+# Add new credential
+suron add NEW_API_KEY sk_live_new123
+
+# Update application to use NEW_API_KEY
+# Deploy application
+
+# Remove old credential
+suron remove OLD_API_KEY
+```
+
+### Cleaning Up
+
+```bash
+# Remove deprecated secrets
+suron remove DEPRECATED_FEATURE_FLAG
+suron remove OLD_DATABASE_URL
+suron remove UNUSED_SERVICE_KEY
+
+# Verify cleanup
+suron list
+```
+
+### Environment-Specific Removal
+
+```bash
+# Remove from staging
+suron remove DEBUG_TOKEN --app myapp-staging
+
+# Production unaffected
+suron list --app myapp-production
+```
+
+## Best Practices
+
+1. **Verify before removing** - Use `suron list` to confirm the key name
+2. **Rotate, don't just remove** - Add replacement secret before removing old one
+3. **Coordinate with deployments** - Ensure apps are updated before removing
+4. **Commit the change** - Remember to commit updated `.env.suron`
+5. **Document removals** - Note why secrets were removed in commit messages
+
+## Workflow Example
+
+```bash
+# List current secrets
+suron list
+
+# Output:
+#   DATABASE_URL enc:sv1
+#   OLD_API_KEY enc:sv1
+#   NEW_API_KEY enc:sv1
+
+# Remove deprecated secret
+suron remove OLD_API_KEY
+
+# Verify removal
+suron list
+
+# Output:
+#   DATABASE_URL enc:sv1
+#   NEW_API_KEY enc:sv1
+
+# Commit the change
+git add .env.suron
+git commit -m "Remove deprecated OLD_API_KEY"
+```
+
+## Related Commands
+
+- [suron list](/cli/commands/list) - List all secrets to verify removal
+- [suron add](/cli/commands/add) - Add a replacement secret
+- [suron decrypt](/cli/commands/decrypt) - View secret value before removing
+- [suron rotate](/cli/commands/rotate) - Rotate master key (different from rotating individual secrets)

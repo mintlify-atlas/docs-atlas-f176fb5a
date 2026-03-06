@@ -1,0 +1,219 @@
+---
+title: Hot Reload
+description: Live secret updates without restarting your application
+---
+
+When you update a secret with `suron add` or `suron encrypt`, the running app automatically picks up the new value within **30 seconds** — no restart, no Telegram approval, no downtime.
+
+## How It Works
+
+The SDK heartbeat sends `knownVaultVersion` to the Worker every 30s. When `suron add` pushes new secrets, the Worker increments `vaultVersion`. On the next heartbeat, the Worker returns `shouldReload: true` — the SDK re-fetches and re-decrypts all secrets into `process.env` in-place.
+
+## Complete Example
+
+<CodeGroup>
+
+```javascript index.js
+import { vault } from '@suronai/sdk'
+import express   from 'express'
+
+await vault.load()
+
+// IMPORTANT — hot-reload updates process.env in-place.
+//
+// This means:
+//   ✅ process.env.API_KEY read inside a request handler → always gets latest value
+//   ❌ const API_KEY = process.env.API_KEY at module level → captured once, never updates
+//
+// Rule: always read process.env.* at the point of use, not at module load time.
+
+// ❌ BAD — captured once at startup, won't reflect hot-reload updates
+// const API_KEY = process.env.API_KEY
+
+const app  = express()
+const port = process.env.PORT || 3000
+
+app.use(express.json())
+
+// ✅ GOOD — reads process.env at request time, always gets the latest value
+app.get('/api/data', async (req, res) => {
+  const response = await fetch('https://api.example.com/data', {
+    headers: { 'Authorization': `Bearer ${process.env.API_KEY}` }  // ← read here
+  })
+  res.json(await response.json())
+})
+
+// ✅ GOOD — feature flag check at request time
+app.get('/api/feature', (req, res) => {
+  const enabled = process.env.FEATURE_FLAG === 'true'  // ← read here
+  res.json({ feature: 'new-ui', enabled })
+})
+
+// Health check — shows current live values of secrets
+app.get('/health', (req, res) => {
+  res.json({
+    status:      'ok',
+    featureFlag: process.env.FEATURE_FLAG,
+    apiKeySet:   !!process.env.API_KEY,
+    // Show when secrets were last loaded (SDK sets this)
+    appId:       process.env.VAULT_APP_ID,
+  })
+})
+
+app.listen(port, () => {
+  console.log(`Server listening on port ${port}`)
+  console.log('Secrets will hot-reload automatically within 30s when you run: suron add/encrypt')
+})
+```
+
+```json package.json
+{
+  "name": "suron-example-hot-reload",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@suronai/sdk": "^1.0.1",
+    "express": "^4.18.2"
+  }
+}
+```
+
+```env .env.example
+VAULT_WORKER_URL=https://suronai-vault.your-account.workers.dev
+VAULT_ACCESS_TOKEN=your_server_access_token
+VAULT_APP_ID=my-app
+FEATURE_FLAG=false
+API_KEY=old-key
+```
+
+</CodeGroup>
+
+## Setup Instructions
+
+```bash
+cp .env.example .env
+npm install
+npm start
+# Approve on Telegram once
+
+# In another terminal — update a secret while the app is running:
+suron add FEATURE_FLAG true
+# Within 30s, the running app will log "Secrets hot-reloaded" and use the new value
+```
+
+## The Critical Rule
+
+Read `process.env` at the point of use, not at module load time:
+
+```javascript
+// ❌ BAD — captured at startup, never updates
+const API_KEY = process.env.API_KEY
+
+// ✅ GOOD — read at request time, always latest
+app.get('/api/data', async (req, res) => {
+  const response = await fetch('https://api.example.com', {
+    headers: { Authorization: `Bearer ${process.env.API_KEY}` }
+  })
+})
+```
+
+<Warning>
+  Hot-reload updates `process.env` in-place. It **cannot** update variables that already captured a value at module load time.
+</Warning>
+
+## How to Update Secrets
+
+### Method 1: Add individual secrets
+
+```bash
+suron add FEATURE_FLAG true
+suron add API_KEY new-api-key-value
+```
+
+### Method 2: Bulk update with encrypt
+
+```bash
+# Edit your .env file
+echo "FEATURE_FLAG=true" >> .env
+
+# Encrypt and push all secrets
+suron encrypt
+```
+
+Both methods trigger hot-reload. Running instances will pick up changes within 30 seconds.
+
+## Use Cases
+
+### Feature Flags
+
+Flip a feature flag without restarting:
+
+```bash
+suron add FEATURE_FLAG true
+```
+
+```javascript
+app.get('/api/feature', (req, res) => {
+  const enabled = process.env.FEATURE_FLAG === 'true'
+  res.json({ newUI: enabled })
+})
+```
+
+### API Key Rotation
+
+Rotate an API key with zero downtime:
+
+```bash
+suron add API_KEY new-key-here
+```
+
+```javascript
+app.get('/api/data', async (req, res) => {
+  const response = await fetch('https://api.example.com', {
+    headers: { Authorization: `Bearer ${process.env.API_KEY}` }
+  })
+})
+```
+
+### Configuration Updates
+
+Update any configuration value instantly:
+
+```bash
+suron add MAX_RETRIES 5
+suron add TIMEOUT_MS 10000
+```
+
+## Timing
+
+- **Heartbeat interval:** 30 seconds
+- **Detection:** Next heartbeat after `suron add` (0-30s)
+- **Reload:** Immediate (< 1s after detection)
+- **Total time:** 0-30 seconds from `suron add` to live in production
+
+<Tip>
+  The first heartbeat happens 30 seconds after `vault.load()`, then every 30 seconds thereafter. If you want to force an immediate check, restart the app (with a persisted permit, this takes < 1s).
+</Tip>
+
+## What Gets Updated
+
+Hot-reload re-fetches and re-decrypts **all** secrets in your vault, then updates `process.env` in-place. This means:
+
+- ✅ All secrets are always in sync
+- ✅ No partial updates
+- ✅ No restart required
+- ✅ No Telegram approval required
+
+## Dependencies
+
+- `@suronai/sdk` ^1.0.1
+- `express` ^4.18.2
+
+## GitHub Source
+
+View the complete source code:
+
+[github.com/Cryptoistaken/Suron/tree/main/examples/07-hot-reload](https://github.com/Cryptoistaken/Suron/tree/main/examples/07-hot-reload)

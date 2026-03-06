@@ -67,7 +67,8 @@
               "cli/commands/list",
               "cli/commands/decrypt",
               "cli/commands/rotate",
-              "cli/commands/run"
+              "cli/commands/run",
+              "cli/commands/upload"
             ]
           },
           {

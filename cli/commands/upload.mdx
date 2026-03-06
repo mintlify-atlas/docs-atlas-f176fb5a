@@ -1,0 +1,152 @@
+---
+title: "suron upload"
+description: "Manually push encrypted vault to Worker (advanced)"
+---
+
+## Overview
+
+The `suron upload` command manually pushes your `.env.suron` file to the Cloudflare Worker. This is an advanced command that is rarely needed — most commands like `encrypt`, `add`, `remove`, and `rotate` automatically push the vault after making changes.
+
+<Note>
+  In most workflows, you don't need to run `suron upload` directly. It's automatically called by other commands.
+</Note>
+
+## Usage
+
+```bash
+suron upload [--app name]
+```
+
+## When to Use
+
+Use `suron upload` in these specific scenarios:
+
+1. **Manual vault restoration** — You have a backup `.env.suron` file and want to restore it
+2. **CI/CD pipelines** — Pushing a vault as part of an automated deployment (though `suron encrypt` is usually better)
+3. **Troubleshooting** — Manually syncing vault after resolving conflicts
+4. **Advanced workflows** — Custom scripts that modify `.env.suron` directly
+
+<Warning>
+  Running `suron upload` overwrites the vault stored in the Worker. Make sure your local `.env.suron` is the version you want to deploy.
+</Warning>
+
+## Flags
+
+<ParamField path="--app" type="string">
+  Override the app name. If not provided, reads from `VAULT_APP` key in `.env.suron` or `VAULT_APP_ID` environment variable.
+</ParamField>
+
+## Examples
+
+### Basic Upload
+
+```bash
+suron upload
+```
+
+**Output:**
+```text
+ℹ Pushing to Suron...
+
+✓ Vault pushed for my-api
+```
+
+### Upload with App Name Override
+
+```bash
+suron upload --app production-api
+```
+
+### Restore from Backup
+
+```bash
+# Copy backup file
+cp .env.suron.backup .env.suron
+
+# Push to Worker
+suron upload
+
+# Verify on server
+# The next restart will pick up the restored secrets
+```
+
+## How It Works
+
+1. **Read vault file** — Loads `.env.suron` from current directory
+2. **Resolve app name** — Uses `--app` flag → `VAULT_APP` in vault → `VAULT_APP_ID` env var
+3. **Authenticate** — Uses CLI token from `~/.suron/auth.json`
+4. **Push to Worker** — Sends vault data to `/admin/upload` endpoint
+5. **Increment version** — Worker increments vault version, triggering hot-reload on running apps
+
+## Error Handling
+
+### App Not Found
+
+```text
+✗ App name not found — run: suron init --app yourapp
+```
+
+**Solution:** Either run `suron init` first, or provide `--app` flag with a valid app name.
+
+### Vault File Missing
+
+```text
+✗ .env.suron not found — run: suron encrypt
+```
+
+**Solution:** Create a vault file using `suron encrypt` or ensure you're in the correct directory.
+
+### Not Logged In
+
+```text
+✗ Not logged in — run: suron login
+```
+
+**Solution:** Authenticate with `suron login` before running upload.
+
+### Worker Connection Failed
+
+```text
+✗ Failed to connect to Worker
+```
+
+**Solution:** Check your network connection and ensure the Worker URL is correct in your auth file.
+
+## Automatic Push Behavior
+
+These commands automatically push the vault after making changes:
+
+| Command | Auto-Push | Why |
+|---------|-----------|-----|
+| `suron encrypt` | ✅ Yes | Encrypts and pushes in one step |
+| `suron add` | ✅ Yes | Updates vault and pushes immediately |
+| `suron remove` | ✅ Yes | Removes secret and pushes immediately |
+| `suron rotate` | ✅ Yes | Re-encrypts all secrets and pushes |
+| `suron upload` | ✅ Yes | Manual push command |
+| `suron list` | ❌ No | Read-only operation |
+| `suron decrypt` | ❌ No | Read-only operation |
+
+<Tip>
+  After `suron upload`, all running servers will receive the updated vault within 30 seconds via hot-reload (no restart needed).
+</Tip>
+
+## CI/CD Integration
+
+For automated deployments, prefer `suron encrypt` over `suron upload`:
+
+```yaml
+# ❌ Not recommended
+- run: suron upload --app production
+
+# ✅ Better
+- run: suron encrypt --app production --yes
+```
+
+The `encrypt` command ensures you're always working with the latest `.env` file, while `upload` only pushes what's already in `.env.suron`.
+
+## Related Commands
+
+- [suron encrypt](/cli/commands/encrypt) — Encrypt `.env` and push (recommended)
+- [suron add](/cli/commands/add) — Add a secret and auto-push
+- [suron rotate](/cli/commands/rotate) — Rotate key and auto-push
+- [CI/CD Integration](/guides/ci-cd-integration) — Automated workflows

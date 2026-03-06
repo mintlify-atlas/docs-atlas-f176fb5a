@@ -1,0 +1,136 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "Suron Vault",
+  "projectDescription": "Encrypted secrets manager for Node.js with AES-256-GCM encryption, split master key architecture, and Telegram approval at runtime",
+  "theme": "aspen",
+  "primaryColor": "#94cb04",
+  "lightColor": "#545454",
+  "darkColor": null,
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/how-it-works",
+              "concepts/security-model",
+              "concepts/architecture",
+              "concepts/vault-file-format"
+            ]
+          },
+          {
+            "group": "SDK Reference",
+            "pages": [
+              "sdk/overview",
+              "sdk/vault-load",
+              "sdk/hot-reload",
+              "sdk/trusted-restart",
+              "sdk/api-reference"
+            ]
+          },
+          {
+            "group": "CLI Reference",
+            "pages": [
+              "cli/overview",
+              "cli/authentication",
+              "cli/commands/init",
+              "cli/commands/encrypt",
+              "cli/commands/add",
+              "cli/commands/remove",
+              "cli/commands/list",
+              "cli/commands/decrypt",
+              "cli/commands/rotate",
+              "cli/commands/run"
+            ]
+          },
+          {
+            "group": "Infrastructure",
+            "pages": [
+              "infrastructure/overview",
+              "infrastructure/cloudflare-worker",
+              "infrastructure/convex-setup",
+              "infrastructure/telegram-bot",
+              "infrastructure/environment-variables"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/deployment",
+              "guides/ci-cd-integration",
+              "guides/troubleshooting",
+              "guides/migration"
+            ]
+          },
+          {
+            "group": "Examples",
+            "pages": [
+              "examples/overview",
+              "examples/basic",
+              "examples/express-api",
+              "examples/fastify-api",
+              "examples/database",
+              "examples/cron-job",
+              "examples/trusted-restart",
+              "examples/hot-reload"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "SDK API",
+            "pages": [
+              "api/vault",
+              "api/events",
+              "api/types"
+            ]
+          },
+          {
+            "group": "Worker API",
+            "pages": [
+              "api/worker/endpoints",
+              "api/worker/authentication"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "AES-256-GCM encryption with per-value unique salt and IV",
+    "Split master key architecture across Convex and Cloudflare KV",
+    "Telegram approval for runtime access",
+    "Hot-reload secrets without process restart",
+    "Trusted restart with 24-hour permit tokens",
+    "CLI for secrets management and encryption",
+    "Zero disk writes - secrets decrypted in RAM only"
+  ],
+  "publicApiSurface": [
+    "vault.load()",
+    "vault.hotReload()",
+    "vault.getPermitToken()",
+    "vault.events",
+    "suron login",
+    "suron init",
+    "suron encrypt",
+    "suron add",
+    "suron remove",
+    "suron list",
+    "suron decrypt",
+    "suron rotate",
+    "suron run"
+  ]
+}
